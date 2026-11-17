@@ -1,0 +1,155 @@
+"""Tests for the FastAPI Desktop & Web UI server."""
+
+import io
+from pathlib import Path
+import threading
+import time
+
+from fastapi.testclient import TestClient
+from PIL import Image
+
+from ocr_pipeline.config import OcrConfig
+from ocr_pipeline.settings import AppSettings, save_settings
+from ocr_pipeline.web.server import create_app
+
+
+def _png_bytes() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (120, 60), color=(255, 255, 255)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _make_test_app(tmp_path: Path, ocr_fn: object = None, on_job_finished: object = None) -> TestClient:
+    settings_path = tmp_path / "settings.json"
+    archive_dir = tmp_path / "archive"
+    save_settings(AppSettings(archive_dir=str(archive_dir), ollama_url="http://127.0.0.1:59999"), settings_path)
+    app = create_app(
+        jobs_root=tmp_path / "jobs",
+        settings_path=settings_path,
+        ocr_fn=ocr_fn,  # type: ignore[arg-type]
+        on_job_finished=on_job_finished,  # type: ignore[arg-type]
+    )
+    return TestClient(app)
+
+
+def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
+    client = _make_test_app(tmp_path)
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "OcrPipeline" in home.text
+    assert "bootstrap" in home.text.lower()
+
+    js = client.get("/static/app.js")
+    assert js.status_code == 200
+    assert js.headers["content-type"].startswith(("application/javascript", "text/javascript"))
+
+    health = client.get("/api/health")
+    assert health.status_code == 200
+    assert health.json()["setup_completed"] is False
+
+    models = client.get("/api/models")
+    assert models.status_code == 200
+    assert models.json()["online"] is False
+    assert len(models.json()["recommended"]) >= 3
+
+
+def test_settings_and_artifact_management(tmp_path: Path) -> None:
+    client = _make_test_app(tmp_path)
+
+    updated = client.put("/api/settings", json={"dpi": 300, "setup_completed": True, "default_model": "glm-ocr"})
+    assert updated.status_code == 200
+    assert updated.json()["dpi"] == 300
+    assert updated.json()["setup_completed"] is True
+
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (archive_dir / "note1.md").write_text("# Sample Note\nHello world", encoding="utf-8")
+
+    listed = client.get("/api/artifacts")
+    assert listed.status_code == 200
+    assert [a["path"] for a in listed.json()["artifacts"]] == ["note1.md"]
+
+    content = client.get("/api/artifacts/content", params={"path": "note1.md"})
+    assert content.status_code == 200
+    assert "Hello world" in content.text
+
+    renamed = client.patch("/api/artifacts/rename", json={"path": "note1.md", "new_name": "renamed_note"})
+    assert renamed.status_code == 200
+    assert renamed.json()["path"] == "renamed_note.md"
+
+    deleted = client.delete("/api/artifacts", params={"path": "renamed_note.md"})
+    assert deleted.status_code == 200
+    assert client.get("/api/artifacts").json()["artifacts"] == []
+
+
+def test_web_ui_upload_job_completes_and_triggers_callback(tmp_path: Path) -> None:
+    finished_statuses: list[str] = []
+
+    def fake_ocr(image_b64: str, cfg: OcrConfig, client: object) -> str:
+        assert len(image_b64) > 20
+        return "# Handwritten Note\n\n[Figure: simple diagram]"
+
+    client = _make_test_app(tmp_path, ocr_fn=fake_ocr, on_job_finished=lambda j: finished_statuses.append(j.status))
+
+    resp = client.post(
+        "/api/jobs",
+        data={"source_mode": "upload", "model": "glm-ocr", "dpi": "150", "series_mode": "true"},
+        files=[("files", ("page_1.png", _png_bytes(), "image/png"))],
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    deadline = time.time() + 5.0
+    job_data = resp.json()
+    while job_data["status"] not in ("completed", "failed") and time.time() < deadline:
+        time.sleep(0.05)
+        job_data = client.get(f"/api/jobs/{job_id}").json()
+
+    assert job_data["status"] == "completed"
+    assert job_data["completed_docs"] == 1
+    assert job_data["files"] == ["input.md"]
+    assert finished_statuses == ["completed"]
+
+    md_resp = client.get(f"/api/jobs/{job_id}/files/input.md")
+    assert md_resp.status_code == 200
+    assert "Handwritten Note" in md_resp.text
+
+    log_resp = client.get(f"/api/jobs/{job_id}/log")
+    assert log_resp.status_code == 200
+    assert "SAVED:" in log_resp.text
+
+    zip_resp = client.get(f"/api/jobs/{job_id}/download-all")
+    assert zip_resp.status_code == 200
+    assert zip_resp.headers["content-type"] == "application/zip"
+
+
+def test_web_ui_cancel_job(tmp_path: Path) -> None:
+    started = threading.Event()
+
+    def slow_ocr(image_b64: str, cfg: OcrConfig, client: object, cancel_event: threading.Event | None = None) -> str:
+        started.set()
+        if cancel_event is not None:
+            cancel_event.wait(timeout=3.0)
+        return "done"
+
+    client = _make_test_app(tmp_path, ocr_fn=slow_ocr)
+    resp = client.post(
+        "/api/jobs",
+        data={"source_mode": "upload", "model": "glm-ocr"},
+        files=[("files", ("page_1.png", _png_bytes(), "image/png"))],
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+    assert started.wait(timeout=2.0)
+
+    cancel_resp = client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancel_resp.status_code == 200
+
+    deadline = time.time() + 3.0
+    job_data = cancel_resp.json()
+    while job_data["status"] not in ("cancelled", "completed", "failed") and time.time() < deadline:
+        time.sleep(0.05)
+        job_data = client.get(f"/api/jobs/{job_id}").json()
+
+    assert job_data["status"] == "cancelled"

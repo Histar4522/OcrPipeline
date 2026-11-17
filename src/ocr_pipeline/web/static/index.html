@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OcrPipeline</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" />
+  <link href="/static/style.css" rel="stylesheet" />
+</head>
+<body class="bg-body-tertiary">
+  <nav class="navbar navbar-expand-lg bg-body border-bottom sticky-top">
+    <div class="container-fluid px-4">
+      <span class="navbar-brand fw-semibold me-4">
+        <i class="bi bi-file-earmark-text text-primary me-2"></i>OcrPipeline
+      </span>
+      <ul class="nav nav-pills me-auto gap-1" id="mainNav">
+        <li class="nav-item">
+          <button class="nav-link active" data-view="jobsView" type="button">
+            <i class="bi bi-play-circle me-1"></i>Jobs
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" data-view="artifactsView" type="button">
+            <i class="bi bi-archive me-1"></i>Artifacts
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" data-view="modelsView" type="button">
+            <i class="bi bi-cpu me-1"></i>Models
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" data-view="settingsView" type="button">
+            <i class="bi bi-gear me-1"></i>Settings
+          </button>
+        </li>
+      </ul>
+      <div class="d-flex align-items-center gap-2">
+        <span id="ollamaBadge" class="badge text-bg-secondary">Checking Ollama...</span>
+        <button id="openWizardBtn" class="btn btn-sm btn-outline-primary" type="button">
+          <i class="bi bi-magic me-1"></i>Setup Wizard
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container-fluid px-4 py-4">
+    <!-- VIEW 1: JOBS -->
+    <section id="jobsView" class="app-view">
+      <div class="row g-4">
+        <div class="col-lg-5 col-xl-4">
+          <div class="card shadow-sm mb-4">
+            <div class="card-header fw-semibold"><i class="bi bi-sliders me-1"></i> New OCR Job</div>
+            <div class="card-body">
+              <ul class="nav nav-pills nav-fill mb-3" role="tablist">
+                <li class="nav-item">
+                  <button class="nav-link active" id="tabUploadBtn" data-bs-toggle="pill" data-bs-target="#tabUpload" type="button">
+                    <i class="bi bi-cloud-upload me-1"></i> Upload Files / Folder
+                  </button>
+                </li>
+                <li class="nav-item">
+                  <button class="nav-link" id="tabLocalBtn" data-bs-toggle="pill" data-bs-target="#tabLocal" type="button">
+                    <i class="bi bi-folder2-open me-1"></i> Local Path
+                  </button>
+                </li>
+              </ul>
+
+              <form id="jobForm">
+                <div class="tab-content mb-3">
+                  <div class="tab-pane fade show active" id="tabUpload">
+                    <div id="dropZone" class="drop-zone border border-2 border-dashed rounded p-4 text-center mb-2">
+                      <i class="bi bi-file-earmark-arrow-up fs-2 text-primary"></i>
+                      <p class="mb-1 fw-medium">Drag & drop PDFs or images here</p>
+                      <p class="text-muted small mb-2">Or select individual files / an entire folder</p>
+                      <div class="d-flex justify-content-center gap-2">
+                        <label class="btn btn-sm btn-outline-primary mb-0">
+                          Select Files
+                          <input id="fileInput" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp" hidden />
+                        </label>
+                        <label class="btn btn-sm btn-outline-secondary mb-0">
+                          Select Folder
+                          <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
+                        </label>
+                      </div>
+                    </div>
+                    <div id="selectedFilesInfo" class="small text-muted">No files selected.</div>
+                  </div>
+                  <div class="tab-pane fade" id="tabLocal">
+                    <div class="mb-2">
+                      <label class="form-label small fw-semibold">Input File or Folder Path</label>
+                      <input id="localInputPath" type="text" class="form-control form-control-sm" placeholder="e.g. D:\Scans\Notebook" />
+                    </div>
+                    <div>
+                      <label class="form-label small fw-semibold">Output Archive Path (optional)</label>
+                      <input id="localOutputPath" type="text" class="form-control form-control-sm" placeholder="Defaults to Settings Archive Directory" />
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row g-2 mb-3">
+                  <div class="col-12">
+                    <label class="form-label small fw-semibold">Ollama OCR / Vision Model</label>
+                    <div class="input-group input-group-sm">
+                      <select id="modelSelect" class="form-select form-select-sm"></select>
+                      <button id="pullModelBtn" class="btn btn-outline-secondary d-none" type="button">
+                        <i class="bi bi-download me-1"></i>Pull
+                      </button>
+                    </div>
+                  </div>
+                  <div class="col-6">
+                    <label class="form-label small fw-semibold">PDF DPI</label>
+                    <input id="dpiInput" type="number" class="form-control form-control-sm" value="220" min="72" max="600" />
+                  </div>
+                  <div class="col-6">
+                    <label class="form-label small fw-semibold">Max Dimension (px)</label>
+                    <input id="maxDimInput" type="number" class="form-control form-control-sm" value="1536" min="512" max="4096" />
+                  </div>
+                </div>
+
+                <div class="d-flex gap-3 mb-3">
+                  <div class="form-check form-switch">
+                    <input id="seriesSwitch" class="form-check-input" type="checkbox" />
+                    <label class="form-check-label small" for="seriesSwitch">Combine images into 1 doc</label>
+                  </div>
+                  <div class="form-check form-switch">
+                    <input id="forceSwitch" class="form-check-input" type="checkbox" />
+                    <label class="form-check-label small" for="forceSwitch">Force reprocess</label>
+                  </div>
+                </div>
+
+                <div id="formError" class="alert alert-danger py-2 small d-none"></div>
+                <button id="startBtn" type="submit" class="btn btn-primary w-100">
+                  <i class="bi bi-play-fill me-1"></i> Start OCR Job
+                </button>
+              </form>
+            </div>
+          </div>
+
+          <div class="card shadow-sm">
+            <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+              <span><i class="bi bi-clock-history me-1"></i> Job History</span>
+              <span id="jobCountBadge" class="badge text-bg-light">0</span>
+            </div>
+            <div id="jobHistoryList" class="list-group list-group-flush job-history-list">
+              <div class="list-group-item text-muted small">No jobs yet.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-lg-7 col-xl-8">
+          <div id="emptyState" class="card shadow-sm p-5 text-center text-muted">
+            <i class="bi bi-markdown fs-1 mb-2"></i>
+            <p class="mb-0">Start an OCR job or select one from Job History to view live progress, Markdown outputs, and logs.</p>
+          </div>
+
+          <div id="jobDetailPanel" class="d-none">
+            <div class="card shadow-sm mb-4">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                  <span id="detailTitle" class="fw-semibold"></span>
+                  <span id="detailStatusBadge" class="badge ms-2"></span>
+                </div>
+                <div class="d-flex gap-2">
+                  <button id="cancelJobBtn" class="btn btn-sm btn-outline-danger d-none" type="button">
+                    <i class="bi bi-stop-circle me-1"></i> Terminate
+                  </button>
+                  <a id="downloadAllBtn" class="btn btn-sm btn-outline-primary d-none" href="#">
+                    <i class="bi bi-file-earmark-zip me-1"></i> Download All (.zip)
+                  </a>
+                </div>
+              </div>
+              <div class="card-body">
+                <div class="small text-muted mb-2" id="detailMeta"></div>
+                <div class="mb-2">
+                  <div class="d-flex justify-content-between small mb-1">
+                    <span>Documents</span>
+                    <span id="docProgressText">0 / 0</span>
+                  </div>
+                  <div class="progress" style="height: 8px;"><div id="docProgressBar" class="progress-bar"></div></div>
+                </div>
+                <div>
+                  <div class="d-flex justify-content-between small mb-1">
+                    <span id="pageProgressLabel">Current Page</span>
+                    <span id="pageProgressText">0 / 0</span>
+                  </div>
+                  <div class="progress" style="height: 8px;"><div id="pageProgressBar" class="progress-bar bg-success"></div></div>
+                </div>
+                <div id="detailError" class="alert alert-danger py-2 small mt-3 d-none"></div>
+              </div>
+            </div>
+
+            <div class="card shadow-sm">
+              <div class="card-header">
+                <ul class="nav nav-tabs card-header-tabs">
+                  <li class="nav-item">
+                    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#outputsTab" type="button">
+                      <i class="bi bi-markdown me-1"></i> Outputs
+                    </button>
+                  </li>
+                  <li class="nav-item">
+                    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#logTab" type="button">
+                      <i class="bi bi-terminal me-1"></i> Log
+                    </button>
+                  </li>
+                </ul>
+              </div>
+              <div class="card-body tab-content">
+                <div class="tab-pane fade show active" id="outputsTab">
+                  <div class="row g-3">
+                    <div class="col-md-4"><div id="outputFileList" class="list-group list-group-flush small border rounded"></div></div>
+                    <div class="col-md-8">
+                      <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span id="previewFileName" class="small fw-semibold text-muted">Select an output file</span>
+                        <div class="btn-group btn-group-sm">
+                          <button id="toggleRawBtn" class="btn btn-outline-secondary" type="button">Raw</button>
+                          <button id="copyMdBtn" class="btn btn-outline-secondary" type="button">Copy</button>
+                          <a id="downloadFileBtn" class="btn btn-outline-primary disabled" href="#">Download</a>
+                        </div>
+                      </div>
+                      <div id="markdownPreview" class="markdown-preview border rounded p-3 bg-body"></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="tab-pane fade" id="logTab">
+                  <pre id="logViewer" class="log-viewer bg-dark text-light p-3 rounded small mb-0"></pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- VIEW 2: ARTIFACTS -->
+    <section id="artifactsView" class="app-view d-none">
+      <div class="card shadow-sm">
+        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+          <div>
+            <span class="fw-semibold"><i class="bi bi-archive me-1"></i> Artifact Archive</span>
+            <span id="artifactDirLabel" class="small text-muted ms-2"></span>
+          </div>
+          <div class="d-flex gap-2">
+            <input id="artifactSearchInput" type="search" class="form-control form-control-sm" placeholder="Filter artifacts..." />
+            <button id="openArchiveFolderBtn" class="btn btn-sm btn-outline-secondary text-nowrap" type="button">
+              <i class="bi bi-folder2-open me-1"></i> Open Folder
+            </button>
+            <button id="refreshArtifactsBtn" class="btn btn-sm btn-outline-primary" type="button">
+              <i class="bi bi-arrow-clockwise"></i>
+            </button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-lg-5">
+              <div id="artifactList" class="list-group artifact-list border rounded"></div>
+            </div>
+            <div class="col-lg-7">
+              <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                <span id="artifactSelectedPath" class="small fw-semibold text-muted">Select an artifact</span>
+                <div class="btn-group btn-group-sm">
+                  <button id="artifactRawBtn" class="btn btn-outline-secondary" type="button">Raw</button>
+                  <button id="artifactCopyBtn" class="btn btn-outline-secondary" type="button">Copy</button>
+                  <button id="artifactRenameBtn" class="btn btn-outline-secondary" type="button" disabled>Rename</button>
+                  <button id="artifactRevealBtn" class="btn btn-outline-secondary" type="button" disabled>Folder</button>
+                  <a id="artifactDownloadBtn" class="btn btn-outline-primary disabled" href="#">Download</a>
+                  <button id="artifactDeleteBtn" class="btn btn-outline-danger" type="button" disabled>Delete</button>
+                </div>
+              </div>
+              <div id="artifactPreview" class="markdown-preview border rounded p-3 bg-body"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- VIEW 3: MODELS -->
+    <section id="modelsView" class="app-view d-none">
+      <div class="row g-4">
+        <div class="col-lg-7">
+          <div class="card shadow-sm">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <span class="fw-semibold"><i class="bi bi-hdd-stack me-1"></i> Installed Ollama Models</span>
+              <button id="modelsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">
+                <i class="bi bi-arrow-clockwise me-1"></i> Refresh
+              </button>
+            </div>
+            <div class="table-responsive">
+              <table class="table table-hover align-middle mb-0 small">
+                <thead class="table-light">
+                  <tr><th>Model</th><th>Params</th><th>Quant</th><th>Size</th><th class="text-end">Actions</th></tr>
+                </thead>
+                <tbody id="installedModelsBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-5">
+          <div class="card shadow-sm mb-4">
+            <div class="card-header fw-semibold"><i class="bi bi-cloud-download me-1"></i> Pull Any Model</div>
+            <div class="card-body">
+              <div class="input-group input-group-sm">
+                <input id="customPullInput" type="text" class="form-control" placeholder="e.g. glm-ocr, deepseek-ocr, qwen3-vl:4b" />
+                <button id="customPullBtn" class="btn btn-primary" type="button">Pull</button>
+              </div>
+              <div id="modelActionStatus" class="small text-muted mt-2"></div>
+            </div>
+          </div>
+          <div class="card shadow-sm">
+            <div class="card-header fw-semibold"><i class="bi bi-stars me-1"></i> Recommended Local OCR Models</div>
+            <div id="recommendedModelsList" class="list-group list-group-flush small"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- VIEW 4: SETTINGS -->
+    <section id="settingsView" class="app-view d-none">
+      <div class="card shadow-sm mx-auto" style="max-width: 820px;">
+        <div class="card-header fw-semibold"><i class="bi bi-gear me-1"></i> Application Settings</div>
+        <div class="card-body">
+          <form id="settingsForm" class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label small fw-semibold">Ollama Server URL</label>
+              <input id="setOllamaUrl" type="url" class="form-control form-control-sm" required />
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small fw-semibold">Default Model</label>
+              <input id="setDefaultModel" type="text" class="form-control form-control-sm" required />
+            </div>
+            <div class="col-12">
+              <label class="form-label small fw-semibold">Default Archive Directory</label>
+              <input id="setArchiveDir" type="text" class="form-control form-control-sm" required />
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small fw-semibold">Default PDF DPI</label>
+              <input id="setDpi" type="number" class="form-control form-control-sm" min="72" max="600" required />
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small fw-semibold">Max Image Dimension</label>
+              <input id="setMaxDim" type="number" class="form-control form-control-sm" min="512" max="4096" required />
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small fw-semibold">Context Window (num_ctx)</label>
+              <input id="setNumCtx" type="number" class="form-control form-control-sm" min="1024" max="32768" required />
+            </div>
+            <div class="col-12">
+              <div class="d-flex justify-content-between align-items-center mb-1">
+                <label class="form-label small fw-semibold mb-0">Transcription System Prompt</label>
+                <button id="resetPromptBtn" class="btn btn-link btn-sm p-0" type="button">Reset to default</button>
+              </div>
+              <textarea id="setSystemPrompt" class="form-control form-control-sm" rows="5"></textarea>
+            </div>
+            <div class="col-md-6">
+              <div class="form-check form-switch">
+                <input id="setMinimizeTray" class="form-check-input" type="checkbox" />
+                <label class="form-check-label small" for="setMinimizeTray">Minimize to system tray on window close</label>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="form-check form-switch">
+                <input id="setDesktopNotify" class="form-check-input" type="checkbox" />
+                <label class="form-check-label small" for="setDesktopNotify">Send desktop toast when a job finishes</label>
+              </div>
+            </div>
+            <div class="col-12 d-flex justify-content-between align-items-center">
+              <span id="settingsSaveMsg" class="small text-success"></span>
+              <button type="submit" class="btn btn-primary btn-sm px-4">Save Settings</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- SETUP WIZARD MODAL -->
+  <div class="modal fade" id="wizardModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-magic text-primary me-2"></i>OcrPipeline Setup Wizard</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="list-group mb-3">
+            <div class="list-group-item d-flex justify-content-between align-items-center">
+              <div>
+                <div class="fw-semibold">1. Local Ollama Service</div>
+                <div id="wizOllamaDesc" class="small text-muted">Checking local Ollama server...</div>
+              </div>
+              <button id="wizRecheckBtn" class="btn btn-sm btn-outline-secondary" type="button">Re-check</button>
+            </div>
+            <div class="list-group-item d-flex justify-content-between align-items-center">
+              <div>
+                <div class="fw-semibold">2. Fast Dedicated OCR Model (<code>glm-ocr</code>)</div>
+                <div id="wizModelDesc" class="small text-muted">Checking installed models...</div>
+              </div>
+              <button id="wizPullGlmBtn" class="btn btn-sm btn-primary" type="button">Pull glm-ocr</button>
+            </div>
+            <div class="list-group-item">
+              <div class="fw-semibold mb-1">3. Archive Output Folder & Desktop Behavior</div>
+              <input id="wizArchiveDir" type="text" class="form-control form-control-sm mb-2" />
+              <div class="d-flex gap-4 small">
+                <label class="form-check-label"><input id="wizTray" type="checkbox" class="form-check-input me-1" checked />Keep in tray on close</label>
+                <label class="form-check-label"><input id="wizNotify" type="checkbox" class="form-check-input me-1" checked />OS toast notifications</label>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="wizFinishBtn" type="button" class="btn btn-success">Finish Setup</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST CONTAINER -->
+  <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

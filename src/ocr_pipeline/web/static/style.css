@@ -1,0 +1,37 @@
+.drop-zone {
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.drop-zone.drag-over {
+  background-color: rgba(13, 110, 253, 0.08);
+  border-color: #0d6efd !important;
+}
+
+.job-history-list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.artifact-list {
+  max-height: 540px;
+  overflow-y: auto;
+}
+
+.markdown-preview {
+  min-height: 360px;
+  max-height: 540px;
+  overflow-y: auto;
+}
+
+.markdown-preview pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-viewer {
+  min-height: 360px;
+  max-height: 540px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
