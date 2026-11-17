@@ -42,6 +42,7 @@ class AppSettings:
     minimize_to_tray: bool = True
     desktop_notifications: bool = True
     obsidian_mode: bool = False
+    theme: str = "auto"
 
     def __post_init__(self) -> None:
         if not self.archive_dir:

@@ -53,6 +53,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     el("setDpi").value = s.dpi;
     el("setMaxDim").value = s.max_image_dim;
     el("setNumCtx").value = s.num_ctx;
+    el("setTheme").value = s.theme || "auto";
     el("setSystemPrompt").value = s.system_prompt;
     el("setMinimizeTray").checked = Boolean(s.minimize_to_tray);
     el("setDesktopNotify").checked = Boolean(s.desktop_notifications);
@@ -149,7 +150,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
           <div class="d-flex justify-content-between align-items-start gap-2 mb-1">
             <div>
               <span class="fw-semibold">${rec.name}</span>
-              <span class="badge text-bg-light ms-1">${rec.size}</span>
+              <span class="badge bg-body-secondary text-body border ms-1">${rec.size}</span>
               <span class="badge text-bg-info ms-1">${rec.vram}</span>
             </div>
             <span class="badge ${isPulled ? "text-bg-success" : "text-bg-secondary"}">${isPulled ? "Installed" : "Not Pulled"}</span>
@@ -344,6 +345,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
       dpi: Number(el("setDpi").value),
       max_image_dim: Number(el("setMaxDim").value),
       num_ctx: Number(el("setNumCtx").value),
+      theme: el("setTheme").value,
       system_prompt: el("setSystemPrompt").value,
       minimize_to_tray: el("setMinimizeTray").checked,
       desktop_notifications: el("setDesktopNotify").checked,

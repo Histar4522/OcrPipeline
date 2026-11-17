@@ -9,6 +9,7 @@ import {
   fetchSettings,
   fileDownloadUrl,
   pullModel,
+  saveSettings,
   startJob,
   startOllama,
 } from "./api.js";
@@ -30,6 +31,25 @@ const state = {
 };
 
 const el = (id) => document.getElementById(id);
+const mediaDark = window.matchMedia("(prefers-color-scheme: dark)");
+
+function applyTheme(mode = "auto") {
+  state.theme = mode;
+  const effective = mode === "auto" ? (mediaDark.matches ? "dark" : "light") : mode;
+  document.documentElement.setAttribute("data-bs-theme", effective);
+
+  const labels = { auto: "Auto", light: "Light", dark: "Dark" };
+  const icons = { auto: "bi-circle-half", light: "bi-sun", dark: "bi-moon-stars" };
+  el("themeLabel").textContent = labels[mode] || "Auto";
+  el("themeIcon").className = `bi ${icons[mode] || "bi-circle-half"} me-1`;
+  document.querySelectorAll("#themeMenu [data-theme]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.theme === mode);
+  });
+}
+
+mediaDark.addEventListener("change", () => {
+  if ((state.theme || "auto") === "auto") applyTheme("auto");
+});
 
 function showToast(title, body, variant = "primary") {
   const container = el("toastContainer");
@@ -125,6 +145,7 @@ async function syncSettingsToJobForm() {
   select.value = settings.default_model;
   el("dpiInput").value = settings.dpi;
   el("maxDimInput").value = settings.max_image_dim;
+  applyTheme(settings.theme || "auto");
   updatePullButton();
 }
 
@@ -406,6 +427,14 @@ el("jobForm").addEventListener("submit", async (e) => {
   } finally {
     el("startBtn").disabled = false;
   }
+});
+
+document.querySelectorAll("#themeMenu [data-theme]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const mode = btn.dataset.theme;
+    applyTheme(mode);
+    await saveSettings({ theme: mode });
+  });
 });
 
 (async () => {

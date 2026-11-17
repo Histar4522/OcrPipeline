@@ -48,7 +48,7 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert sys_info.json()["ram_gb"] > 0
     assert sys_info.json()["cpu_count"] >= 1
 
-    for asset in ("/static/app.js", "/static/markdown.js"):
+    for asset in ("/static/app.js", "/static/markdown.js", "/static/dialogs.js"):
         js = client.get(asset)
         assert js.status_code == 200
         assert js.headers["content-type"].startswith(("application/javascript", "text/javascript"))
@@ -111,12 +111,13 @@ def test_settings_and_artifact_management(tmp_path: Path) -> None:
 
     updated = client.put(
         "/api/settings",
-        json={"dpi": 300, "setup_completed": True, "default_model": "glm-ocr", "obsidian_mode": True},
+        json={"dpi": 300, "setup_completed": True, "default_model": "glm-ocr", "obsidian_mode": True, "theme": "dark"},
     )
     assert updated.status_code == 200
     assert updated.json()["dpi"] == 300
     assert updated.json()["setup_completed"] is True
     assert updated.json()["obsidian_mode"] is True
+    assert updated.json()["theme"] == "dark"
 
     archive_dir = tmp_path / "archive"
     assert (archive_dir / ".obsidian" / "app.json").exists()

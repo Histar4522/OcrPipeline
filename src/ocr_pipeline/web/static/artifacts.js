@@ -9,12 +9,13 @@ import {
   revealArtifact,
   updateArtifactTags,
 } from "./api.js";
+import { bsConfirm, bsMoveArtifact, bsPrompt } from "./dialogs.js";
 import { renderMarkdownContent } from "./markdown.js";
 
 const el = (id) => document.getElementById(id);
 
 export function initArtifactsView({ showToast }) {
-  const artState = { items: [], selected: null, rawMode: false, rawText: "", obsidianMode: false };
+  const artState = { items: [], folders: [], selected: null, rawMode: false, rawText: "", obsidianMode: false };
 
   function renderPreview() {
     renderMarkdownContent(el("artifactPreview"), artState.rawText, artState.rawMode, "Select an artifact to preview.");
@@ -34,6 +35,7 @@ export function initArtifactsView({ showToast }) {
   function setActionsEnabled(enabled) {
     el("artifactTagsBtn").disabled = !enabled;
     el("artifactRenameBtn").disabled = !enabled;
+    el("artifactMoveBtn").disabled = !enabled;
     el("artifactRevealBtn").disabled = !enabled;
     el("artifactObsidianBtn").disabled = !enabled;
     el("artifactDeleteBtn").disabled = !enabled;
@@ -99,7 +101,7 @@ export function initArtifactsView({ showToast }) {
       const tagRow = btn.querySelector(".tag-row");
       for (const t of (item.tags || []).slice(0, 4)) {
         const badge = document.createElement("span");
-        badge.className = "badge text-bg-light text-dark border";
+        badge.className = "badge bg-body-secondary text-body border";
         badge.textContent = `#${t}`;
         tagRow.appendChild(badge);
       }
@@ -116,11 +118,12 @@ export function initArtifactsView({ showToast }) {
       sort: el("artifactSortSelect").value,
     });
     artState.items = data.artifacts || [];
+    artState.folders = data.folders || [];
     artState.obsidianMode = Boolean(data.obsidian_mode);
     el("artifactDirLabel").textContent = data.archive_dir || "";
     el("obsidianBadge").classList.toggle("d-none", !artState.obsidianMode);
     el("artifactObsidianBtn").classList.toggle("d-none", !artState.obsidianMode);
-    populateFilterDropdowns(data.folders, data.tags);
+    populateFilterDropdowns(artState.folders, data.tags);
     renderList();
   }
 
@@ -132,7 +135,12 @@ export function initArtifactsView({ showToast }) {
   el("openArchiveFolderBtn").addEventListener("click", () => revealArtifact(""));
 
   el("newFolderBtn").addEventListener("click", async () => {
-    const name = window.prompt("New archive folder path (e.g. Notes/Physics):");
+    const name = await bsPrompt({
+      title: "New Archive Folder",
+      label: "Folder path inside archive",
+      placeholder: "e.g. Notes/Physics",
+      confirmText: "Create",
+    });
     if (!name || !name.trim()) return;
     try {
       const res = await createArtifactFolder(name.trim());
@@ -165,7 +173,14 @@ export function initArtifactsView({ showToast }) {
   el("artifactTagsBtn").addEventListener("click", async () => {
     if (!artState.selected) return;
     const current = (artState.selected.tags || []).join(", ");
-    const next = window.prompt("Comma-separated tags:", current);
+    const next = await bsPrompt({
+      title: "Edit Artifact Tags",
+      label: "Comma-separated tags (leave empty to clear)",
+      value: current,
+      placeholder: "handwritten, physics, lecture",
+      confirmText: "Update Tags",
+      required: false,
+    });
     if (next === null) return;
     try {
       const res = await updateArtifactTags(artState.selected.path, next.split(","));
@@ -180,27 +195,52 @@ export function initArtifactsView({ showToast }) {
 
   el("artifactRenameBtn").addEventListener("click", async () => {
     if (!artState.selected) return;
-    const nextName = window.prompt("Filename (.md):", artState.selected.name);
-    if (nextName === null) return;
-    const nextFolder = window.prompt("Target folder (blank = archive root):", artState.selected.folder || "");
-    if (nextFolder === null) return;
+    const nextName = await bsPrompt({
+      title: "Rename Artifact",
+      label: "New filename (.md)",
+      value: artState.selected.name,
+      confirmText: "Rename",
+    });
+    if (!nextName || !nextName.trim() || nextName.trim() === artState.selected.name) return;
     try {
-      const res = await moveOrRenameArtifact(artState.selected.path, {
-        newName: nextName.trim() || artState.selected.name,
-        targetFolder: nextFolder.trim(),
-      });
-      showToast("Moved / Renamed", res.path, "success");
+      const res = await moveOrRenameArtifact(artState.selected.path, { newName: nextName.trim() });
+      showToast("Renamed", res.path, "success");
       await refresh();
       const updated = artState.items.find((i) => i.path === res.path);
       if (updated) await selectArtifact(updated);
     } catch (err) {
-      showToast("Move / Rename Failed", err.message, "danger");
+      showToast("Rename Failed", err.message, "danger");
+    }
+  });
+
+  el("artifactMoveBtn").addEventListener("click", async () => {
+    if (!artState.selected) return;
+    const targetFolder = await bsMoveArtifact({
+      path: artState.selected.path,
+      currentFolder: artState.selected.folder || "",
+      folders: artState.folders,
+    });
+    if (targetFolder === null || targetFolder === (artState.selected.folder || "")) return;
+    try {
+      const res = await moveOrRenameArtifact(artState.selected.path, { targetFolder });
+      showToast("Moved", res.path, "success");
+      await refresh();
+      const updated = artState.items.find((i) => i.path === res.path);
+      if (updated) await selectArtifact(updated);
+    } catch (err) {
+      showToast("Move Failed", err.message, "danger");
     }
   });
 
   el("artifactDeleteBtn").addEventListener("click", async () => {
     if (!artState.selected) return;
-    if (!window.confirm(`Delete "${artState.selected.path}" permanently?`)) return;
+    const confirmed = await bsConfirm({
+      title: "Delete Artifact",
+      message: `Delete "${artState.selected.path}" permanently? This cannot be undone.`,
+      confirmText: "Delete",
+      variant: "danger",
+    });
+    if (!confirmed) return;
     try {
       await deleteArtifact(artState.selected.path);
       artState.selected = null;

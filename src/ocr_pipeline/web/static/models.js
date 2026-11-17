@@ -1,4 +1,5 @@
 import { deleteModel, fetchModels, pullModel, saveSettings } from "./api.js";
+import { bsConfirm } from "./dialogs.js";
 
 const el = (id) => document.getElementById(id);
 
@@ -53,7 +54,13 @@ export function initModelsView({ showToast, onModelsChanged }) {
           await onModelsChanged();
         });
         tr.querySelector(".del-btn").addEventListener("click", async () => {
-          if (!window.confirm(`Delete Ollama model "${m.name}"?`)) return;
+          const ok = await bsConfirm({
+            title: "Delete Model",
+            message: `Delete Ollama model "${m.name}" from local storage?`,
+            confirmText: "Delete",
+            variant: "danger",
+          });
+          if (!ok) return;
           try {
             await deleteModel(m.name);
             showToast("Model Deleted", `${m.name} removed from Ollama.`);
@@ -74,7 +81,7 @@ export function initModelsView({ showToast, onModelsChanged }) {
       row.className = "list-group-item d-flex justify-content-between align-items-start gap-2";
       row.innerHTML = `
         <div>
-          <div class="fw-semibold">${rec.name} <span class="badge text-bg-light">${rec.size}</span> <span class="badge text-bg-info">${rec.vram}</span></div>
+          <div class="fw-semibold">${rec.name} <span class="badge bg-body-secondary text-body border">${rec.size}</span> <span class="badge text-bg-info">${rec.vram}</span></div>
           <div class="text-muted">${rec.description}</div>
         </div>
         <button class="btn btn-sm ${pulled ? "btn-outline-success" : "btn-outline-primary"} text-nowrap" type="button" ${pulled ? "disabled" : ""}>

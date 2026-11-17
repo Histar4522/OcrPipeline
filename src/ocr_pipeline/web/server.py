@@ -266,6 +266,8 @@ def create_app(
         current.dpi = max(72, min(int(current.dpi), 600))
         current.max_image_dim = max(512, min(int(current.max_image_dim), 4096))
         current.num_ctx = max(1024, min(int(current.num_ctx), 32768))
+        if current.theme not in ("auto", "light", "dark"):
+            current.theme = "auto"
         if not current.archive_dir.strip():
             current.archive_dir = str(AppSettings().archive_dir)
         save_settings(current, settings_path)
