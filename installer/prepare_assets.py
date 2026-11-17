@@ -20,20 +20,27 @@ def _to_rtf(plain_text: str) -> str:
     return "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Segoe UI;}}\\fs18\n" + escaped + "\n}"
 
 
-def main() -> None:
-    assets_dir = ROOT / "installer" / "build_assets"
-    assets_dir.mkdir(parents=True, exist_ok=True)
+def prepare_assets(assets_dir: Path | None = None) -> Path:
+    """Generate PNG, ICO, ICNS icons and License.rtf into build_assets."""
+    target = assets_dir or (ROOT / "installer" / "build_assets")
+    target.mkdir(parents=True, exist_ok=True)
 
     icon = generate_app_icon_image(256)
-    icon.save(assets_dir / "app_icon.png", format="PNG")
+    icon.save(target / "app_icon.png", format="PNG")
     icon.save(
-        assets_dir / "app_icon.ico",
+        target / "app_icon.ico",
         format="ICO",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
+    icon.save(target / "app_icon.icns", format="ICNS")
 
     license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
-    (assets_dir / "License.rtf").write_text(_to_rtf(license_text), encoding="utf-8")
+    (target / "License.rtf").write_text(_to_rtf(license_text), encoding="utf-8")
+    return target
+
+
+def main() -> None:
+    assets_dir = prepare_assets()
     print(f"Prepared installer assets in {assets_dir}")
 
 
