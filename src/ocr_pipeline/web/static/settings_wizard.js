@@ -1,9 +1,49 @@
-import { fetchModels, fetchSettings, pullModel, saveSettings, startOllama } from "./api.js";
+import {
+  fetchModelPullStatus,
+  fetchModels,
+  fetchSettings,
+  fetchSystemInfo,
+  openExternalUrl,
+  revealArtifact,
+  saveSettings,
+  startModelPull,
+  startOllama,
+} from "./api.js";
 
 const el = (id) => document.getElementById(id);
 
-export function initSettingsAndWizard({ showToast, onSettingsSaved }) {
-  const wizardModal = new window.bootstrap.Modal(el("wizardModal"));
+const STEP_TITLES = [
+  "Step 1 of 5 · Welcome & System Check",
+  "Step 2 of 5 · Local Ollama Engine",
+  "Step 3 of 5 · Choose & Download OCR Model",
+  "Step 4 of 5 · Archive, Presets & Desktop Behavior",
+  "Step 5 of 5 · Review & Finish",
+];
+
+export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFinished }) {
+  const wizState = {
+    step: 1,
+    selectedModel: "glm-ocr",
+    dpi: 220,
+    maxDim: 1536,
+    ollamaOnline: false,
+    modelsData: null,
+    pullTimer: null,
+  };
+
+  function toggleWizardShell(open) {
+    el("mainNavbar").classList.toggle("d-none", open);
+    el("mainContent").classList.toggle("d-none", open);
+    el("mainFooter").classList.toggle("d-none", open);
+    el("wizardView").classList.toggle("d-none", !open);
+  }
+
+  function stopPullPolling() {
+    if (wizState.pullTimer) {
+      clearInterval(wizState.pullTimer);
+      wizState.pullTimer = null;
+    }
+  }
 
   async function loadSettingsForm() {
     const s = await fetchSettings();
@@ -17,74 +57,233 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved }) {
     el("setMinimizeTray").checked = Boolean(s.minimize_to_tray);
     el("setDesktopNotify").checked = Boolean(s.desktop_notifications);
     el("setObsidianMode").checked = Boolean(s.obsidian_mode);
+
+    wizState.selectedModel = s.default_model || "glm-ocr";
+    wizState.dpi = s.dpi || 220;
+    wizState.maxDim = s.max_image_dim || 1536;
+    el("wizOllamaUrl").value = s.ollama_url;
     el("wizArchiveDir").value = s.archive_dir;
     el("wizTray").checked = Boolean(s.minimize_to_tray);
     el("wizNotify").checked = Boolean(s.desktop_notifications);
     el("wizObsidian").checked = Boolean(s.obsidian_mode);
+    syncPresetCards();
     return s;
   }
 
-  async function checkWizardStatus(autoLaunch = true) {
-    const oDesc = el("wizOllamaDesc");
-    const mDesc = el("wizModelDesc");
-    const pullBtn = el("wizPullGlmBtn");
+  function syncPresetCards() {
+    document.querySelectorAll("#wizPresetCards [data-preset]").forEach((card) => {
+      const match = Number(card.dataset.dpi) === wizState.dpi && Number(card.dataset.dim) === wizState.maxDim;
+      card.classList.toggle("selected", match);
+    });
+  }
+
+  async function loadSystemStep() {
+    try {
+      const info = await fetchSystemInfo();
+      const gpuLabel = info.gpu_name ? `${info.gpu_name} (${info.vram_gb} GB VRAM)` : "CPU / Integrated";
+      el("wizSystemGrid").innerHTML = `
+        <div class="col-md-4"><strong>OS:</strong> ${info.os}</div>
+        <div class="col-md-4"><strong>CPU / RAM:</strong> ${info.cpu_count} cores · ${info.ram_gb} GB</div>
+        <div class="col-md-4"><strong>GPU:</strong> ${gpuLabel}</div>`;
+      el("wizVramNote").textContent = info.vram_note;
+    } catch {
+      el("wizSystemGrid").innerHTML = '<div class="col-12 text-muted">System check unavailable.</div>';
+    }
+  }
+
+  async function refreshOllamaStep(autoLaunch = false) {
+    const alertBox = el("wizOllamaAlert");
     const startBtn = el("wizStartOllamaBtn");
+    const installGuide = el("wizInstallGuide");
 
     let data = await fetchModels();
     if (!data.online && data.installed && autoLaunch) {
-      oDesc.className = "small text-primary";
-      oDesc.textContent = "Detected local Ollama installation. Starting Ollama service...";
+      alertBox.className = "alert alert-info small mb-3";
+      alertBox.textContent = "Local Ollama binary detected. Launching background Ollama service...";
       startBtn.classList.add("d-none");
       try {
         const res = await startOllama();
-        if (res.online) {
-          showToast("Ollama Started", "Local Ollama service launched automatically.", "success");
-          await onSettingsSaved();
-        }
+        if (res.online) await onSettingsSaved();
       } catch {
-        // Ignore transient startup error and re-check below
+        // Re-check below
       }
       data = await fetchModels();
     }
 
+    wizState.modelsData = data;
+    wizState.ollamaOnline = Boolean(data.online);
+
     if (data.online) {
-      oDesc.className = "small text-success";
-      oDesc.textContent = `Connected to ${data.ollama_url} (${data.models.length} model(s) installed).`;
+      alertBox.className = "alert alert-success small mb-3";
+      alertBox.textContent = `Connected to ${data.ollama_url} — ${data.models.length} model(s) installed.`;
       startBtn.classList.add("d-none");
+      installGuide.classList.add("d-none");
     } else if (data.installed) {
-      oDesc.className = "small text-warning";
-      oDesc.textContent = `Ollama is installed, but not responding at ${data.ollama_url}. Click Start Ollama or check Settings.`;
+      alertBox.className = "alert alert-warning small mb-3";
+      alertBox.textContent = `Ollama is installed, but not responding at ${data.ollama_url}. Click Start Ollama or verify the URL.`;
       startBtn.classList.remove("d-none");
+      installGuide.classList.add("d-none");
     } else {
-      oDesc.className = "small text-danger";
-      oDesc.textContent = `Ollama was not detected at ${data.ollama_url} or in PATH. Install Ollama, then click Re-check.`;
+      alertBox.className = "alert alert-danger small mb-3";
+      alertBox.textContent = `Ollama is not running at ${data.ollama_url} and was not found in PATH.`;
       startBtn.classList.add("d-none");
+      installGuide.classList.remove("d-none");
+    }
+    renderModelCards();
+  }
+
+  function renderModelCards() {
+    const data = wizState.modelsData;
+    const container = el("wizModelCards");
+    if (!data) return;
+    const installed = new Set(data.models || []);
+    container.innerHTML = "";
+
+    for (const rec of data.recommended || []) {
+      const isPulled = installed.has(rec.name) || installed.has(`${rec.name}:latest`);
+      const isSelected = wizState.selectedModel === rec.name || wizState.selectedModel === `${rec.name}:latest`;
+      const col = document.createElement("div");
+      col.className = "col-md-6";
+      col.innerHTML = `
+        <div class="border rounded p-3 h-100 wizard-choice-card ${isSelected ? "selected" : ""}">
+          <div class="d-flex justify-content-between align-items-start gap-2 mb-1">
+            <div>
+              <span class="fw-semibold">${rec.name}</span>
+              <span class="badge text-bg-light ms-1">${rec.size}</span>
+              <span class="badge text-bg-info ms-1">${rec.vram}</span>
+            </div>
+            <span class="badge ${isPulled ? "text-bg-success" : "text-bg-secondary"}">${isPulled ? "Installed" : "Not Pulled"}</span>
+          </div>
+          <p class="small text-muted mb-2">${rec.description}</p>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-xs ${isSelected ? "btn-primary" : "btn-outline-primary"} select-btn">
+              ${isSelected ? "Default Selected" : "Use as Default"}
+            </button>
+            ${!isPulled ? `<button type="button" class="btn btn-xs btn-outline-success pull-btn" ${data.online ? "" : "disabled"}>Download</button>` : ""}
+          </div>
+        </div>`;
+
+      col.querySelector(".select-btn").addEventListener("click", () => {
+        wizState.selectedModel = rec.name;
+        renderModelCards();
+      });
+      const pullBtn = col.querySelector(".pull-btn");
+      if (pullBtn) {
+        pullBtn.addEventListener("click", () => beginModelPull(rec.name));
+      }
+      container.appendChild(col);
+    }
+  }
+
+  async function beginModelPull(modelName) {
+    const panel = el("wizPullPanel");
+    const statusText = el("wizPullStatusText");
+    const pctText = el("wizPullPercent");
+    const bar = el("wizPullBar");
+    panel.classList.remove("d-none");
+    bar.className = "progress-bar progress-bar-striped progress-bar-animated";
+    statusText.textContent = `Starting download for ${modelName}...`;
+    pctText.textContent = "0%";
+    bar.style.width = "0%";
+
+    try {
+      await startModelPull(modelName);
+    } catch (err) {
+      showToast("Pull Error", err.message, "danger");
+      return;
     }
 
-    const hasGlm = data.models.includes("glm-ocr") || data.models.includes("glm-ocr:latest");
-    if (hasGlm) {
-      mDesc.className = "small text-success";
-      mDesc.textContent = "glm-ocr is installed and ready for fast local OCR.";
-      pullBtn.disabled = true;
-      pullBtn.textContent = "Installed";
-    } else {
-      mDesc.className = "small text-muted";
-      mDesc.textContent = data.models.length
-        ? `Installed: ${data.models.join(", ")}. Pull glm-ocr (~0.9B) for fastest 8 GB VRAM performance.`
-        : "No OCR model pulled yet. Click Pull glm-ocr to download (~1 GB).";
-      pullBtn.disabled = !data.online;
-      pullBtn.textContent = "Pull glm-ocr";
-    }
+    stopPullPolling();
+    wizState.pullTimer = setInterval(async () => {
+      try {
+        const st = await fetchModelPullStatus();
+        const pct = Math.min(100, Math.round(st.percent || 0));
+        const sizeNote = st.total_mb > 0 ? ` (${st.completed_mb} / ${st.total_mb} MB)` : "";
+        statusText.textContent = `${st.model}: ${st.status}${sizeNote}`;
+        pctText.textContent = `${pct}%`;
+        bar.style.width = `${pct}%`;
+
+        if (st.done) {
+          stopPullPolling();
+          if (st.error) {
+            bar.className = "progress-bar bg-danger";
+            statusText.textContent = st.error;
+            showToast("Download Failed", st.error, "danger");
+          } else {
+            bar.className = "progress-bar bg-success";
+            wizState.selectedModel = modelName;
+            await refreshOllamaStep(false);
+            await onSettingsSaved();
+            showToast("Model Ready", `${modelName} installed.`, "success");
+          }
+        }
+      } catch {
+        stopPullPolling();
+      }
+    }, 600);
+  }
+
+  function renderSummaryStep() {
+    const items = [
+      ["Ollama Server", `${el("wizOllamaUrl").value.trim()} (${wizState.ollamaOnline ? "Connected" : "Offline"})`],
+      ["Default OCR Model", wizState.selectedModel],
+      ["Quality Preset", `${wizState.dpi} DPI · ${wizState.maxDim} px max dimension`],
+      ["Archive Directory", el("wizArchiveDir").value.trim()],
+      ["Obsidian Vault Mode", el("wizObsidian").checked ? "Enabled (.obsidian + YAML frontmatter)" : "Disabled"],
+      ["Desktop Integration", `${el("wizTray").checked ? "Minimize to tray" : "Exit on close"} · ${el("wizNotify").checked ? "OS toasts on" : "OS toasts off"}`],
+    ];
+    el("wizSummaryList").innerHTML = items
+      .map(([k, v]) => `<li class="list-group-item d-flex justify-content-between"><span class="fw-semibold">${k}</span><span class="text-muted text-end">${v}</span></li>`)
+      .join("");
+  }
+
+  function goToStep(stepNum) {
+    wizState.step = Math.max(1, Math.min(5, stepNum));
+    el("wizStepSubtitle").textContent = STEP_TITLES[wizState.step - 1];
+    el("wizProgressBar").style.width = `${wizState.step * 20}%`;
+
+    document.querySelectorAll("#wizStepNav [data-wiz-step]").forEach((btn) => {
+      btn.classList.toggle("active", Number(btn.dataset.wizStep) === wizState.step);
+    });
+    document.querySelectorAll("#wizardView .wiz-step").forEach((pane) => {
+      pane.classList.toggle("d-none", Number(pane.dataset.step) !== wizState.step);
+    });
+
+    el("wizBackBtn").disabled = wizState.step === 1;
+    el("wizNextBtn").classList.toggle("d-none", wizState.step === 5);
+    el("wizFinishBtn").classList.toggle("d-none", wizState.step !== 5);
+
+    if (wizState.step === 2) refreshOllamaStep(true);
+    if (wizState.step === 3 && !wizState.modelsData) refreshOllamaStep(false);
+    if (wizState.step === 5) renderSummaryStep();
   }
 
   async function openWizard() {
-    await loadSettingsForm();
-    wizardModal.show();
-    await checkWizardStatus(true);
+    toggleWizardShell(true);
+    goToStep(1);
+    await Promise.all([loadSettingsForm(), loadSystemStep()]);
+    await refreshOllamaStep(true);
+  }
+
+  function closeWizard() {
+    stopPullPolling();
+    toggleWizardShell(false);
   }
 
   el("openWizardBtn").addEventListener("click", openWizard);
-  el("wizRecheckBtn").addEventListener("click", () => checkWizardStatus(false));
+  el("wizExitBtn").addEventListener("click", closeWizard);
+  el("wizBackBtn").addEventListener("click", () => goToStep(wizState.step - 1));
+  el("wizNextBtn").addEventListener("click", () => goToStep(wizState.step + 1));
+  document.querySelectorAll("#wizStepNav [data-wiz-step]").forEach((btn) => {
+    btn.addEventListener("click", () => goToStep(Number(btn.dataset.wizStep)));
+  });
+
+  el("wizRecheckBtn").addEventListener("click", async () => {
+    await saveSettings({ ollama_url: el("wizOllamaUrl").value.trim() });
+    await refreshOllamaStep(false);
+    await onSettingsSaved();
+  });
+
   el("wizStartOllamaBtn").addEventListener("click", async () => {
     const btn = el("wizStartOllamaBtn");
     btn.disabled = true;
@@ -96,37 +295,38 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved }) {
     } finally {
       btn.disabled = false;
       btn.textContent = "Start Ollama";
-      await checkWizardStatus(false);
+      await refreshOllamaStep(false);
     }
   });
-  el("wizPullGlmBtn").addEventListener("click", async () => {
-    const btn = el("wizPullGlmBtn");
-    btn.disabled = true;
-    btn.textContent = "Pulling...";
-    try {
-      await pullModel("glm-ocr");
-      await saveSettings({ default_model: "glm-ocr" });
-      showToast("Model Ready", "glm-ocr pulled and set as default.", "success");
-    } catch (err) {
-      showToast("Pull Failed", err.message, "danger");
-    } finally {
-      await checkWizardStatus();
-      await onSettingsSaved();
-    }
+
+  el("wizDownloadOllamaBtn").addEventListener("click", () => openExternalUrl("https://ollama.com/download"));
+  el("wizOpenArchiveBtn").addEventListener("click", () => revealArtifact(""));
+
+  document.querySelectorAll("#wizPresetCards [data-preset]").forEach((card) => {
+    card.addEventListener("click", () => {
+      wizState.dpi = Number(card.dataset.dpi);
+      wizState.maxDim = Number(card.dataset.dim);
+      syncPresetCards();
+    });
   });
 
   el("wizFinishBtn").addEventListener("click", async () => {
     await saveSettings({
       setup_completed: true,
+      ollama_url: el("wizOllamaUrl").value.trim(),
+      default_model: wizState.selectedModel,
+      dpi: wizState.dpi,
+      max_image_dim: wizState.maxDim,
       archive_dir: el("wizArchiveDir").value.trim(),
       minimize_to_tray: el("wizTray").checked,
       desktop_notifications: el("wizNotify").checked,
       obsidian_mode: el("wizObsidian").checked,
     });
-    wizardModal.hide();
+    closeWizard();
     await loadSettingsForm();
     await onSettingsSaved();
-    showToast("Setup Complete", "Preferences saved.", "success");
+    if (onWizardFinished) onWizardFinished();
+    showToast("Setup Complete", "OcrPipeline is configured and ready.", "success");
   });
 
   el("resetPromptBtn").addEventListener("click", async () => {

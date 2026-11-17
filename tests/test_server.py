@@ -40,6 +40,13 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert "OcrPipeline" in home.text
     assert "bootstrap" in home.text.lower()
     assert "katex" in home.text.lower()
+    assert 'id="wizardView"' in home.text
+    assert 'id="wizardModal"' not in home.text
+
+    sys_info = client.get("/api/system-info")
+    assert sys_info.status_code == 200
+    assert sys_info.json()["ram_gb"] > 0
+    assert sys_info.json()["cpu_count"] >= 1
 
     for asset in ("/static/app.js", "/static/markdown.js"):
         js = client.get(asset)
@@ -75,6 +82,28 @@ def test_ollama_start_endpoint_when_missing(tmp_path: Path, monkeypatch: object)
     res = client.post("/api/ollama/start")
     assert res.status_code == 200
     assert res.json()["installed"] is False
+
+
+def test_async_model_pull_progress(tmp_path: Path, monkeypatch: object) -> None:
+    import ocr_pipeline.web.server as srv
+
+    def fake_stream(url: str, model: str, on_progress: object) -> None:
+        on_progress({"status": "downloading", "completed": 50 * 1024 * 1024, "total": 100 * 1024 * 1024, "percent": 50.0})  # type: ignore[operator]
+
+    monkeypatch.setattr(srv, "pull_model_stream", fake_stream)  # type: ignore[attr-defined]
+    client = _make_test_app(tmp_path)
+    start = client.post("/api/models/pull-async", data={"model": "glm-ocr"})
+    assert start.status_code == 200
+
+    deadline = time.time() + 3.0
+    st = start.json()
+    while not st["done"] and time.time() < deadline:
+        time.sleep(0.05)
+        st = client.get("/api/models/pull-status").json()
+
+    assert st["done"] is True
+    assert st["status"] == "completed"
+    assert st["percent"] == 100.0
 
 
 def test_settings_and_artifact_management(tmp_path: Path) -> None:

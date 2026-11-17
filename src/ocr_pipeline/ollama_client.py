@@ -1,5 +1,7 @@
 """Local Ollama REST API client for Vision-Language OCR."""
 
+from collections.abc import Callable
+import json
 import os
 from pathlib import Path
 import platform
@@ -50,6 +52,41 @@ def pull_model(base_url: str, model: str, timeout: float = 600.0) -> None:
     try:
         response = httpx.post(url, json={"model": model, "stream": False}, timeout=timeout)
         response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise OllamaError(f"Failed to pull model '{model}': {exc}") from exc
+
+
+def pull_model_stream(
+    base_url: str,
+    model: str,
+    on_progress: Callable[[dict], None],
+    timeout: float = 1800.0,
+) -> None:
+    """Pull an Ollama model with streaming layer progress callbacks."""
+    url = f"{base_url.rstrip('/')}/api/pull"
+    try:
+        with httpx.stream("POST", url, json={"model": model, "stream": True}, timeout=timeout) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except ValueError:
+                    continue
+                if "error" in chunk:
+                    raise OllamaError(str(chunk["error"]))
+                total = int(chunk.get("total") or 0)
+                completed = int(chunk.get("completed") or 0)
+                percent = round((completed / total) * 100, 1) if total > 0 else None
+                on_progress(
+                    {
+                        "status": chunk.get("status", "pulling"),
+                        "completed": completed,
+                        "total": total,
+                        "percent": percent,
+                    }
+                )
     except httpx.HTTPError as exc:
         raise OllamaError(f"Failed to pull model '{model}': {exc}") from exc
 

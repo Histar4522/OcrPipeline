@@ -11,7 +11,7 @@
   <link href="/static/style.css" rel="stylesheet" />
 </head>
 <body class="bg-body-tertiary d-flex flex-column min-vh-100">
-  <nav class="navbar navbar-expand-lg bg-body border-bottom sticky-top">
+  <nav id="mainNavbar" class="navbar navbar-expand-lg bg-body border-bottom sticky-top">
     <div class="container-fluid px-4">
       <span class="navbar-brand fw-semibold me-4">
         <i class="bi bi-file-earmark-text text-primary me-2"></i>OcrPipeline
@@ -47,7 +47,7 @@
     </div>
   </nav>
 
-  <main class="container-fluid px-4 py-4 flex-grow-1">
+  <main id="mainContent" class="container-fluid px-4 py-4 flex-grow-1">
     <!-- VIEW 1: JOBS -->
     <section id="jobsView" class="app-view">
       <div class="row g-4">
@@ -442,55 +442,170 @@
     </section>
   </main>
 
-  <footer class="border-top bg-body py-2 px-4 small text-muted d-flex justify-content-between mt-auto">
+  <footer id="mainFooter" class="border-top bg-body py-2 px-4 small text-muted d-flex justify-content-between mt-auto">
     <span id="footerVersion">OcrPipeline v0.1.0</span>
     <span id="footerLicense">MIT / Apache-2.0 · © 2026 Weien Xu</span>
   </footer>
 
-  <!-- SETUP WIZARD MODAL -->
-  <div class="modal fade" id="wizardModal" tabindex="-1">
-    <div class="modal-dialog modal-lg modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-magic text-primary me-2"></i>OcrPipeline Setup Wizard</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+  <!-- FULL-WINDOW POST-INSTALL SETUP WIZARD -->
+  <section id="wizardView" class="wizard-fullscreen d-none d-flex flex-column bg-body-tertiary">
+    <header class="bg-body border-bottom px-4 py-3">
+      <div class="mx-auto wizard-card d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+          <img src="/api/icon.png" alt="" width="28" height="28" />
+          <div>
+            <div class="fw-semibold lh-sm">OcrPipeline Post-Install Setup</div>
+            <div class="small text-muted" id="wizStepSubtitle">Step 1 of 5 · Welcome & System Check</div>
+          </div>
         </div>
-        <div class="modal-body">
-          <div class="list-group mb-3">
-            <div class="list-group-item d-flex justify-content-between align-items-center gap-2">
-              <div>
-                <div class="fw-semibold">1. Local Ollama Service</div>
-                <div id="wizOllamaDesc" class="small text-muted">Checking local Ollama server...</div>
+        <button id="wizExitBtn" type="button" class="btn btn-sm btn-outline-secondary">Exit Wizard</button>
+      </div>
+    </header>
+
+    <div class="container py-4 flex-grow-1 d-flex flex-column align-items-center">
+      <div class="wizard-card">
+        <div class="progress mb-3" style="height: 6px;">
+          <div id="wizProgressBar" class="progress-bar" style="width: 20%;"></div>
+        </div>
+        <ul class="nav nav-pills nav-justified small mb-4 gap-1" id="wizStepNav">
+          <li class="nav-item"><button class="nav-link active" data-wiz-step="1" type="button">1. System</button></li>
+          <li class="nav-item"><button class="nav-link" data-wiz-step="2" type="button">2. Ollama</button></li>
+          <li class="nav-item"><button class="nav-link" data-wiz-step="3" type="button">3. Model</button></li>
+          <li class="nav-item"><button class="nav-link" data-wiz-step="4" type="button">4. Archive & App</button></li>
+          <li class="nav-item"><button class="nav-link" data-wiz-step="5" type="button">5. Finish</button></li>
+        </ul>
+
+        <div class="card shadow-sm">
+          <div class="card-body p-4">
+            <!-- Step 1 -->
+            <div class="wiz-step" data-step="1">
+              <h4 class="mb-2">Welcome to OcrPipeline</h4>
+              <p class="text-muted">Archive handwritten notes, equations, tables, and diagrams from PDFs or images into structured Markdown—100% locally and free using Ollama.</p>
+              <div class="card bg-body-tertiary border mb-3">
+                <div class="card-body small">
+                  <div class="fw-semibold mb-2"><i class="bi bi-pc-display me-1"></i> Detected Hardware & Environment</div>
+                  <div class="row g-2" id="wizSystemGrid">
+                    <div class="col-md-6">Checking system capabilities...</div>
+                  </div>
+                  <div id="wizVramNote" class="mt-2 text-primary fw-medium"></div>
+                </div>
               </div>
-              <div class="d-flex gap-1 flex-shrink-0">
-                <button id="wizStartOllamaBtn" class="btn btn-sm btn-primary d-none" type="button">Start Ollama</button>
-                <button id="wizRecheckBtn" class="btn btn-sm btn-outline-secondary" type="button">Re-check</button>
+              <div class="small text-muted">Click <strong>Next</strong> to verify or start your local Ollama engine.</div>
+            </div>
+
+            <!-- Step 2 -->
+            <div class="wiz-step d-none" data-step="2">
+              <h4 class="mb-2">Connect Local Ollama Engine</h4>
+              <p class="text-muted small">OcrPipeline runs vision/OCR models locally via Ollama so your documents never leave your machine.</p>
+              <div class="mb-3">
+                <label class="form-label small fw-semibold">Ollama Server URL</label>
+                <div class="input-group input-group-sm">
+                  <input id="wizOllamaUrl" type="url" class="form-control" value="http://localhost:11434" />
+                  <button id="wizRecheckBtn" class="btn btn-outline-secondary" type="button">Test Connection</button>
+                  <button id="wizStartOllamaBtn" class="btn btn-primary d-none" type="button">Start Ollama</button>
+                </div>
+              </div>
+              <div id="wizOllamaAlert" class="alert alert-secondary small mb-3">Checking Ollama status...</div>
+              <div id="wizInstallGuide" class="card border d-none">
+                <div class="card-body small">
+                  <div class="fw-semibold mb-1">Ollama Not Detected — Quick Install</div>
+                  <p class="text-muted mb-2">Install Ollama for your OS, then click <strong>Test Connection</strong>:</p>
+                  <ul class="mb-2">
+                    <li><strong>Windows:</strong> <code>winget install Ollama.Ollama</code></li>
+                    <li><strong>macOS:</strong> <code>brew install ollama</code></li>
+                    <li><strong>Linux:</strong> <code>curl -fsSL https://ollama.com/install.sh | sh</code></li>
+                  </ul>
+                  <button id="wizDownloadOllamaBtn" type="button" class="btn btn-sm btn-outline-primary">
+                    <i class="bi bi-box-arrow-up-right me-1"></i>Open ollama.com/download in Browser
+                  </button>
+                </div>
               </div>
             </div>
-            <div class="list-group-item d-flex justify-content-between align-items-center">
-              <div>
-                <div class="fw-semibold">2. Fast Dedicated OCR Model (<code>glm-ocr</code>)</div>
-                <div id="wizModelDesc" class="small text-muted">Checking installed models...</div>
+
+            <!-- Step 3 -->
+            <div class="wiz-step d-none" data-step="3">
+              <h4 class="mb-2">Choose & Download Your OCR Model</h4>
+              <p class="text-muted small">Select your default local model. For most laptops (including 8 GB VRAM GPUs), <strong>glm-ocr</strong> is fast and avoids shared-memory slowdowns.</p>
+              <div id="wizModelCards" class="row g-2 mb-3"></div>
+              <div id="wizPullPanel" class="border rounded p-3 bg-body-tertiary d-none">
+                <div class="d-flex justify-content-between small mb-1">
+                  <span id="wizPullStatusText">Preparing download...</span>
+                  <span id="wizPullPercent">0%</span>
+                </div>
+                <div class="progress" style="height: 10px;">
+                  <div id="wizPullBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%;"></div>
+                </div>
               </div>
-              <button id="wizPullGlmBtn" class="btn btn-sm btn-primary" type="button">Pull glm-ocr</button>
             </div>
-            <div class="list-group-item">
-              <div class="fw-semibold mb-1">3. Archive Output Folder & Desktop Behavior</div>
-              <input id="wizArchiveDir" type="text" class="form-control form-control-sm mb-2" />
-              <div class="d-flex flex-wrap gap-3 small">
-                <label class="form-check-label"><input id="wizTray" type="checkbox" class="form-check-input me-1" checked />Keep in tray on close</label>
-                <label class="form-check-label"><input id="wizNotify" type="checkbox" class="form-check-input me-1" checked />OS toast notifications</label>
-                <label class="form-check-label"><input id="wizObsidian" type="checkbox" class="form-check-input me-1" />Obsidian Vault integration</label>
+
+            <!-- Step 4 -->
+            <div class="wiz-step d-none" data-step="4">
+              <h4 class="mb-2">Archive Folder, Quality Preset & Desktop Behavior</h4>
+              <div class="mb-3">
+                <label class="form-label small fw-semibold">Default Archive Directory</label>
+                <div class="input-group input-group-sm">
+                  <input id="wizArchiveDir" type="text" class="form-control" />
+                  <button id="wizOpenArchiveBtn" class="btn btn-outline-secondary" type="button">Open Folder</button>
+                </div>
               </div>
+              <div class="mb-3">
+                <label class="form-label small fw-semibold">OCR Quality Preset</label>
+                <div class="row g-2" id="wizPresetCards">
+                  <div class="col-md-4">
+                    <div class="border rounded p-2 wizard-choice-card small" data-preset="fast" data-dpi="150" data-dim="1280">
+                      <div class="fw-semibold">Fast Draft</div>
+                      <div class="text-muted">150 DPI · 1280 px</div>
+                    </div>
+                  </div>
+                  <div class="col-md-4">
+                    <div class="border rounded p-2 wizard-choice-card small selected" data-preset="balanced" data-dpi="220" data-dim="1536">
+                      <div class="fw-semibold">Balanced (Recommended)</div>
+                      <div class="text-muted">220 DPI · 1536 px</div>
+                    </div>
+                  </div>
+                  <div class="col-md-4">
+                    <div class="border rounded p-2 wizard-choice-card small" data-preset="detail" data-dpi="300" data-dim="2048">
+                      <div class="fw-semibold">High-Detail</div>
+                      <div class="text-muted">300 DPI · 2048 px</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="border rounded p-3 bg-body-tertiary d-flex flex-column gap-2 small">
+                <div class="form-check form-switch">
+                  <input id="wizObsidian" type="checkbox" class="form-check-input" />
+                  <label class="form-check-label" for="wizObsidian"><strong>Obsidian Vault Mode</strong> — Add <code>.obsidian/</code> config & YAML frontmatter tags to archived notes</label>
+                </div>
+                <div class="form-check form-switch">
+                  <input id="wizTray" type="checkbox" class="form-check-input" checked />
+                  <label class="form-check-label" for="wizTray"><strong>Keep in System Tray</strong> — Closing the window keeps background OCR jobs running</label>
+                </div>
+                <div class="form-check form-switch">
+                  <input id="wizNotify" type="checkbox" class="form-check-input" checked />
+                  <label class="form-check-label" for="wizNotify"><strong>Desktop Toast Notifications</strong> — Notify when OCR jobs finish</label>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 5 -->
+            <div class="wiz-step d-none" data-step="5">
+              <h4 class="mb-2">Ready to Archive</h4>
+              <p class="text-muted small">Review your configuration below, then click <strong>Finish & Open Workspace</strong>.</p>
+              <ul id="wizSummaryList" class="list-group list-group-flush border rounded small mb-2"></ul>
+            </div>
+          </div>
+
+          <div class="card-footer bg-body d-flex justify-content-between align-items-center py-3">
+            <button id="wizBackBtn" type="button" class="btn btn-outline-secondary btn-sm px-3">Back</button>
+            <div class="d-flex gap-2">
+              <button id="wizNextBtn" type="button" class="btn btn-primary btn-sm px-4">Next</button>
+              <button id="wizFinishBtn" type="button" class="btn btn-success btn-sm px-4 d-none">Finish & Open Workspace</button>
             </div>
           </div>
         </div>
-        <div class="modal-footer">
-          <button id="wizFinishBtn" type="button" class="btn btn-success">Finish Setup</button>
-        </div>
       </div>
     </div>
-  </div>
+  </section>
 
   <!-- TOAST CONTAINER -->
   <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>

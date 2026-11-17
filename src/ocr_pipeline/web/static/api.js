@@ -9,6 +9,7 @@ async function requestJson(url, options) {
 }
 
 export const fetchHealth = () => requestJson("/api/health");
+export const fetchSystemInfo = () => requestJson("/api/system-info");
 export const openExternalUrl = (url) =>
   requestJson("/api/open-url", {
     method: "POST",
@@ -30,6 +31,12 @@ export const pullModel = (model) => {
   fd.append("model", model);
   return requestJson("/api/models/pull", { method: "POST", body: fd });
 };
+export const startModelPull = (model) => {
+  const fd = new FormData();
+  fd.append("model", model);
+  return requestJson("/api/models/pull-async", { method: "POST", body: fd });
+};
+export const fetchModelPullStatus = () => requestJson("/api/models/pull-status");
 export const deleteModel = (model) =>
   requestJson(`/api/models/${encodeURIComponent(model)}`, { method: "DELETE" });
 

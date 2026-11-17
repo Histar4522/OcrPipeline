@@ -283,7 +283,11 @@ function selectJob(jobId) {
 
 const artifactsView = initArtifactsView({ showToast });
 const modelsView = initModelsView({ showToast, onModelsChanged: syncSettingsToJobForm });
-const settingsWizard = initSettingsAndWizard({ showToast, onSettingsSaved: syncSettingsToJobForm });
+const settingsWizard = initSettingsAndWizard({
+  showToast,
+  onSettingsSaved: syncSettingsToJobForm,
+  onWizardFinished: () => switchView("jobsView"),
+});
 
 function switchView(target) {
   document.querySelectorAll("#mainNav [data-view]").forEach((b) => {

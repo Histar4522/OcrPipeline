@@ -7,6 +7,7 @@ import io
 import mimetypes
 from pathlib import Path
 import platform
+import sys
 import threading
 import uuid
 import zipfile
@@ -36,9 +37,10 @@ from ..ollama_client import (
     list_models_detailed,
     ocr_image_b64,
     pull_model,
+    pull_model_stream,
     start_ollama_service,
 )
-from ..platform_utils import generate_app_icon_image, open_in_file_manager
+from ..platform_utils import generate_app_icon_image, get_system_info, open_in_file_manager
 from ..runner import OcrFn, ProgressEvent, run_pipeline
 from ..settings import AppSettings, default_jobs_dir, load_settings, save_settings
 
@@ -47,7 +49,17 @@ mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("application/javascript", ".mjs")
 mimetypes.add_type("text/css", ".css")
 
-STATIC_DIR = Path(__file__).parent / "static"
+def _resolve_static_dir() -> Path:
+    local = Path(__file__).parent / "static"
+    if local.is_dir():
+        return local
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "ocr_pipeline" / "web" / "static"
+    return local
+
+
+STATIC_DIR = _resolve_static_dir()
 
 RECOMMENDED_MODELS = [
     {
@@ -177,6 +189,16 @@ def create_app(
     root.mkdir(parents=True, exist_ok=True)
     jobs: dict[str, JobState] = {}
     lock = threading.Lock()
+    pull_state: dict = {
+        "active": False,
+        "model": "",
+        "status": "idle",
+        "percent": 0.0,
+        "completed_mb": 0.0,
+        "total_mb": 0.0,
+        "done": False,
+        "error": "",
+    }
     effective_ocr_fn: OcrFn = ocr_fn or ocr_image_b64
 
     def get_settings() -> AppSettings:
@@ -220,6 +242,10 @@ def create_app(
             "platform": platform.system(),
             "setup_completed": cfg.setup_completed,
         }
+
+    @app.get("/api/system-info")
+    def system_info() -> dict:
+        return get_system_info()
 
     @app.get("/api/settings")
     def read_settings() -> dict:
@@ -290,6 +316,62 @@ def create_app(
             return {"ok": True, "model": target}
         except OllamaError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/api/models/pull-async")
+    def start_model_pull(model: str = Form(...)) -> dict:
+        cfg = get_settings()
+        target = model.strip()
+        if not target:
+            raise HTTPException(status_code=400, detail="Model name is required.")
+        with lock:
+            if pull_state["active"]:
+                raise HTTPException(status_code=409, detail=f"Already pulling '{pull_state['model']}'.")
+            pull_state.update(
+                {
+                    "active": True,
+                    "model": target,
+                    "status": "starting",
+                    "percent": 0.0,
+                    "completed_mb": 0.0,
+                    "total_mb": 0.0,
+                    "done": False,
+                    "error": "",
+                }
+            )
+
+        def on_progress(ev: dict) -> None:
+            with lock:
+                pull_state["status"] = ev.get("status", "pulling")
+                completed = ev.get("completed") or 0
+                total = ev.get("total") or 0
+                pull_state["completed_mb"] = round(completed / (1024 * 1024), 1)
+                pull_state["total_mb"] = round(total / (1024 * 1024), 1)
+                if ev.get("percent") is not None:
+                    pull_state["percent"] = float(ev["percent"])
+
+        def worker() -> None:
+            try:
+                pull_model_stream(cfg.ollama_url, target, on_progress=on_progress)
+                with lock:
+                    pull_state["active"] = False
+                    pull_state["done"] = True
+                    pull_state["percent"] = 100.0
+                    pull_state["status"] = "completed"
+            except Exception as exc:
+                with lock:
+                    pull_state["active"] = False
+                    pull_state["done"] = True
+                    pull_state["status"] = "failed"
+                    pull_state["error"] = str(exc)
+
+        threading.Thread(target=worker, daemon=True).start()
+        with lock:
+            return dict(pull_state)
+
+    @app.get("/api/models/pull-status")
+    def get_model_pull_status() -> dict:
+        with lock:
+            return dict(pull_state)
 
     @app.delete("/api/models/{model_name:path}")
     def remove_ollama_model(model_name: str) -> dict:

@@ -28,6 +28,7 @@ ocr-pipeline-app = "ocr_pipeline.desktop:main"
 
 [dependency-groups]
 dev = [
+    "pyinstaller>=6.10.0",
     "pytest>=8.0.0",
 ]
 

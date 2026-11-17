@@ -36,3 +36,18 @@ uv run ocr-pipeline --server
 ```powershell
 uv run ocr-pipeline "D:\path\to\docs" -o "D:\path\to\archive" --model glm-ocr
 ```
+
+## Building Installers (Cross-Platform)
+
+### Standalone App Bundle (Windows / macOS / Linux)
+```powershell
+uv run --no-sync python installer/prepare_assets.py
+uv run --no-sync --with pyinstaller pyinstaller --noconfirm --clean installer/OcrPipeline.spec
+```
+Produces `dist/OcrPipeline/` (`.exe` on Windows, `.app` bundle on macOS, binary on Linux).
+
+### Windows MSI Installation Wizard (WiX Toolset v6)
+```powershell
+pwsh -ExecutionPolicy Bypass -File installer\windows\build_installer.ps1
+```
+Produces `dist/OcrPipeline-0.1.0-x64.msi` with a step-by-step installation wizard, MIT/Apache-2.0 license screen, custom install path, Start Menu & Desktop shortcuts, and uninstaller.

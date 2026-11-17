@@ -1,6 +1,7 @@
 """Cross-platform desktop application shell (pywebview + system tray + OS notifications)."""
 
 import argparse
+import os
 from pathlib import Path
 import socket
 import sys
@@ -43,6 +44,11 @@ def _wait_for_server(url: str, timeout: float = 10.0) -> None:
 
 def launch_desktop_app(port: int | None = None, ollama_url: str | None = None) -> int:
     """Launch OcrPipeline in a pywebview window with system tray retention and OS toasts."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
     host = "127.0.0.1"
     chosen_port = port or _find_free_port(host)
     base_url = f"http://{host}:{chosen_port}"
@@ -75,7 +81,7 @@ def launch_desktop_app(port: int | None = None, ollama_url: str | None = None) -
                     pass
 
     app = create_app(ollama_url=ollama_url, on_job_finished=on_job_finished)
-    uv_config = uvicorn.Config(app, host=host, port=chosen_port, log_level="warning")
+    uv_config = uvicorn.Config(app, host=host, port=chosen_port, log_level="warning", log_config=None)
     server = uvicorn.Server(uv_config)
     threading.Thread(target=server.run, daemon=True).start()
     _wait_for_server(base_url)

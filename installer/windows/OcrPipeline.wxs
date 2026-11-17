@@ -1,0 +1,60 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="OcrPipeline"
+           Manufacturer="Weien Xu"
+           Version="0.1.0"
+           UpgradeCode="6F7B1E4C-3D28-4C5E-9A4B-8E7A2D4F9C11"
+           Scope="perUser">
+    <SummaryInformation Description="Local AI OCR Desktop Application (MIT / Apache-2.0)" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="AppIcon.ico" SourceFile="installer\build_assets\app_icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+    <WixVariable Id="WixUILicenseRtf" Value="installer\build_assets\License.rtf" />
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDir" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="OcrPipeline" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppMenuFolder" Name="OcrPipeline" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder" />
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="..\..\dist\OcrPipeline\**" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="Shortcuts" Directory="AppMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="91A2B3C4-5D6E-47F8-9012-3456789ABCDE">
+        <RegistryValue Root="HKCU" Key="Software\OcrPipeline" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+        <Shortcut Id="OcrPipelineStartShortcut"
+                  Name="OcrPipeline"
+                  Description="Local AI OCR Pipeline"
+                  Target="[INSTALLFOLDER]OcrPipeline.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon.ico" />
+        <RemoveFolder Id="RemoveAppMenuFolder" Directory="AppMenuFolder" On="uninstall" />
+      </Component>
+      <Component Id="DesktopShortcutComp" Directory="DesktopFolder" Guid="A2B3C4D5-6E7F-4809-A123-456789ABCDEF">
+        <RegistryValue Root="HKCU" Key="Software\OcrPipeline" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+        <Shortcut Id="OcrPipelineDesktopShortcut"
+                  Name="OcrPipeline"
+                  Description="Local AI OCR Pipeline"
+                  Target="[INSTALLFOLDER]OcrPipeline.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon.ico" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="MainFeature" Title="OcrPipeline Desktop App" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentGroupRef Id="Shortcuts" />
+    </Feature>
+  </Package>
+</Wix>

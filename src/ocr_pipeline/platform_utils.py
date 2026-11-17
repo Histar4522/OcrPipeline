@@ -3,11 +3,13 @@
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 
 from notifypy import Notify
 from PIL import Image, ImageDraw
 from platformdirs import user_data_dir
+import psutil
 
 
 def open_in_file_manager(path: Path) -> None:
@@ -95,3 +97,51 @@ def send_toast(title: str, message: str, icon_path: Path | None = None) -> bool:
         return True
     except Exception:
         return False
+
+
+def get_system_info() -> dict:
+    """Collect OS, CPU, RAM, and optional NVIDIA GPU/VRAM info for the Setup Wizard."""
+    ram_gb = round(psutil.virtual_memory().total / (1024**3), 1)
+    gpu_name: str | None = None
+    vram_gb: float | None = None
+
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi:
+        kwargs: dict = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 2.0,
+        }
+        if platform.system() == "Windows":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        try:
+            proc = subprocess.run(
+                [nvidia_smi, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                **kwargs,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                line = proc.stdout.strip().splitlines()[0]
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 2:
+                    gpu_name = parts[0]
+                    vram_gb = round(float(parts[1]) / 1024.0, 1)
+        except Exception:
+            pass
+
+    if vram_gb is not None and vram_gb <= 8.5:
+        vram_note = f"{vram_gb} GB VRAM detected — glm-ocr (~2.2 GB) fits cleanly without shared-memory spill."
+    elif vram_gb is not None:
+        vram_note = f"{vram_gb} GB VRAM detected — supports both glm-ocr and larger VL models."
+    else:
+        vram_note = "No dedicated NVIDIA GPU detected — glm-ocr (~0.9B) is strongly recommended for CPU/unified memory."
+
+    return {
+        "os": f"{platform.system()} {platform.release()}",
+        "system": platform.system(),
+        "cpu_count": os.cpu_count() or 1,
+        "ram_gb": ram_gb,
+        "gpu_name": gpu_name,
+        "vram_gb": vram_gb,
+        "recommended_model": "glm-ocr",
+        "vram_note": vram_note,
+    }
