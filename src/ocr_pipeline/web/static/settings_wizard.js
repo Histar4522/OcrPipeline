@@ -1,4 +1,4 @@
-import { fetchModels, fetchSettings, pullModel, saveSettings } from "./api.js";
+import { fetchModels, fetchSettings, pullModel, saveSettings, startOllama } from "./api.js";
 
 const el = (id) => document.getElementById(id);
 
@@ -22,18 +22,37 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved }) {
     return s;
   }
 
-  async function checkWizardStatus() {
-    const data = await fetchModels();
+  async function checkWizardStatus(autoLaunch = true) {
     const oDesc = el("wizOllamaDesc");
     const mDesc = el("wizModelDesc");
     const pullBtn = el("wizPullGlmBtn");
+    const startBtn = el("wizStartOllamaBtn");
+
+    let data = await fetchModels();
+    if (!data.online && data.installed && autoLaunch) {
+      oDesc.className = "small text-primary";
+      oDesc.textContent = "Detected local Ollama installation. Attempting to start Ollama service...";
+      startBtn.classList.add("d-none");
+      const res = await startOllama();
+      if (res.online) {
+        showToast("Ollama Started", "Local Ollama service launched automatically.", "success");
+        await onSettingsSaved();
+      }
+      data = await fetchModels();
+    }
 
     if (data.online) {
       oDesc.className = "small text-success";
       oDesc.textContent = `Connected to ${data.ollama_url} (${data.models.length} model(s) installed).`;
+      startBtn.classList.add("d-none");
+    } else if (data.installed) {
+      oDesc.className = "small text-warning";
+      oDesc.textContent = `Ollama is installed, but not responding at ${data.ollama_url}. Click Start Ollama or check Settings.`;
+      startBtn.classList.remove("d-none");
     } else {
       oDesc.className = "small text-danger";
-      oDesc.textContent = `Cannot reach ${data.ollama_url}. Install/start Ollama (` + "`ollama serve`" + `), then click Re-check.`;
+      oDesc.textContent = `Ollama was not detected at ${data.ollama_url} or in PATH. Install Ollama, then click Re-check.`;
+      startBtn.classList.add("d-none");
     }
 
     const hasGlm = data.models.includes("glm-ocr") || data.models.includes("glm-ocr:latest");
@@ -54,12 +73,26 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved }) {
 
   async function openWizard() {
     await loadSettingsForm();
-    await checkWizardStatus();
     wizardModal.show();
+    await checkWizardStatus(true);
   }
 
   el("openWizardBtn").addEventListener("click", openWizard);
-  el("wizRecheckBtn").addEventListener("click", checkWizardStatus);
+  el("wizRecheckBtn").addEventListener("click", () => checkWizardStatus(false));
+  el("wizStartOllamaBtn").addEventListener("click", async () => {
+    const btn = el("wizStartOllamaBtn");
+    btn.disabled = true;
+    btn.textContent = "Starting...";
+    try {
+      const res = await startOllama();
+      if (!res.online) showToast("Ollama", res.message, "warning");
+      await onSettingsSaved();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Start Ollama";
+      await checkWizardStatus(false);
+    }
+  });
   el("wizPullGlmBtn").addEventListener("click", async () => {
     const btn = el("wizPullGlmBtn");
     btn.disabled = true;

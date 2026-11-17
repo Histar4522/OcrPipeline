@@ -12,7 +12,13 @@ import pystray
 import uvicorn
 import webview
 
-from .platform_utils import ensure_app_icon_file, generate_app_icon_image, open_in_file_manager, send_toast
+from .platform_utils import (
+    ensure_app_icon_file,
+    ensure_window_icon_file,
+    generate_app_icon_image,
+    open_in_file_manager,
+    send_toast,
+)
 from .settings import load_settings
 from .web.server import JobState, create_app
 
@@ -41,6 +47,7 @@ def launch_desktop_app(port: int | None = None, ollama_url: str | None = None) -
     chosen_port = port or _find_free_port(host)
     base_url = f"http://{host}:{chosen_port}"
     icon_path = ensure_app_icon_file()
+    window_icon_path = ensure_window_icon_file()
     tray_ref: dict[str, pystray.Icon | None] = {"icon": None}
     quitting = threading.Event()
     window_ref: dict[str, webview.Window | None] = {"win": None}
@@ -125,7 +132,7 @@ def launch_desktop_app(port: int | None = None, ollama_url: str | None = None) -
     window.events.closing += on_closing
 
     try:
-        webview.start()
+        webview.start(icon=str(window_icon_path))
     finally:
         if not quitting.is_set():
             quit_app()

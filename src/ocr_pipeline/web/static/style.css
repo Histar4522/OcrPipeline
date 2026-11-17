@@ -35,3 +35,15 @@
   overflow-y: auto;
   white-space: pre-wrap;
 }
+
+.job-panel-disabled {
+  opacity: 0.48;
+  filter: grayscale(1);
+  pointer-events: none;
+  user-select: none;
+}
+
+.btn-xs {
+  padding: 0.15rem 0.45rem;
+  font-size: 0.75rem;
+}

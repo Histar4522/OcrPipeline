@@ -3,6 +3,8 @@ name = "ocr-pipeline"
 version = "0.1.0"
 description = "Free, local, Ollama-powered AI OCR desktop app and pipeline for PDFs and image series."
 readme = "README.md"
+license = "MIT OR Apache-2.0"
+authors = [{ name = "Weien Xu" }]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",

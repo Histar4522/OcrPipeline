@@ -1,5 +1,10 @@
 """Local Ollama REST API client for Vision-Language OCR."""
 
+import os
+from pathlib import Path
+import platform
+import shutil
+import subprocess
 import threading
 import time
 
@@ -82,6 +87,95 @@ def delete_model(base_url: str, model: str, timeout: float = 15.0) -> None:
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise OllamaError(f"Failed to delete model '{model}': {exc}") from exc
+
+
+def find_ollama_executable() -> str | None:
+    """Locate the local Ollama binary across Windows, macOS, and Linux."""
+    found = shutil.which("ollama")
+    if found:
+        return found
+
+    system = platform.system()
+    candidates: list[Path] = []
+    if system == "Windows":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        prog_files = os.environ.get("ProgramFiles", "")
+        if local_app:
+            candidates.append(Path(local_app) / "Programs" / "Ollama" / "ollama.exe")
+        if prog_files:
+            candidates.append(Path(prog_files) / "Ollama" / "ollama.exe")
+    elif system == "Darwin":
+        candidates.extend(
+            [
+                Path("/Applications/Ollama.app/Contents/MacOS/Ollama"),
+                Path("/opt/homebrew/bin/ollama"),
+                Path("/usr/local/bin/ollama"),
+            ]
+        )
+    else:
+        candidates.extend([Path("/usr/local/bin/ollama"), Path("/usr/bin/ollama")])
+
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def start_ollama_service(base_url: str, wait_seconds: float = 8.0) -> dict:
+    """Attempt to start `ollama serve` in the background if Ollama is installed but offline."""
+    tags_url = f"{base_url.rstrip('/')}/api/tags"
+    try:
+        resp = httpx.get(tags_url, timeout=1.5)
+        if resp.status_code == 200:
+            return {"online": True, "installed": True, "started": False, "message": "Ollama is already running."}
+    except httpx.HTTPError:
+        pass
+
+    exe = find_ollama_executable()
+    if not exe:
+        return {
+            "online": False,
+            "installed": False,
+            "started": False,
+            "message": "Ollama executable was not found on this machine.",
+        }
+
+    kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if platform.system() == "Windows":
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        kwargs["creationflags"] = flags
+    else:
+        kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen([exe, "serve"], **kwargs)
+    except OSError as exc:
+        return {
+            "online": False,
+            "installed": True,
+            "started": False,
+            "message": f"Failed to launch Ollama: {exc}",
+        }
+
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        try:
+            resp = httpx.get(tags_url, timeout=1.0)
+            if resp.status_code == 200:
+                return {"online": True, "installed": True, "started": True, "message": "Ollama started."}
+        except httpx.HTTPError:
+            time.sleep(0.35)
+
+    return {
+        "online": False,
+        "installed": True,
+        "started": False,
+        "message": "Launched Ollama, but the server did not respond in time.",
+    }
 
 
 def ocr_image_b64(

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from ocr_pipeline.platform_utils import ensure_app_icon_file, generate_app_icon_image
+from ocr_pipeline.platform_utils import ensure_app_icon_file, ensure_window_icon_file, generate_app_icon_image
 from ocr_pipeline.settings import AppSettings, load_settings, save_settings
 
 
@@ -32,3 +32,6 @@ def test_app_icon_generation(tmp_path: Path) -> None:
     icon_file = ensure_app_icon_file(tmp_path)
     assert icon_file.exists()
     assert icon_file.stat().st_size > 100
+    win_icon = ensure_window_icon_file(tmp_path)
+    assert win_icon.exists()
+    assert win_icon.stat().st_size > 100

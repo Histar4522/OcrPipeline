@@ -67,6 +67,22 @@ def ensure_app_icon_file(icon_dir: Path | None = None) -> Path:
     return icon_path
 
 
+def ensure_window_icon_file(icon_dir: Path | None = None) -> Path:
+    """Return a platform-appropriate window icon (.ico on Windows, .png elsewhere)."""
+    if platform.system() != "Windows":
+        return ensure_app_icon_file(icon_dir)
+    target_dir = icon_dir or Path(user_data_dir("OcrPipeline", appauthor=False))
+    target_dir.mkdir(parents=True, exist_ok=True)
+    ico_path = target_dir / "app_icon.ico"
+    if not ico_path.exists():
+        generate_app_icon_image(128).save(
+            ico_path,
+            format="ICO",
+            sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128)],
+        )
+    return ico_path
+
+
 def send_toast(title: str, message: str, icon_path: Path | None = None) -> bool:
     """Send a cross-platform desktop toast notification without raising on failure."""
     try:

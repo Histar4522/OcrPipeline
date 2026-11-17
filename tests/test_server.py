@@ -44,14 +44,32 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert js.status_code == 200
     assert js.headers["content-type"].startswith(("application/javascript", "text/javascript"))
 
+    icon = client.get("/api/icon.png")
+    assert icon.status_code == 200
+    assert icon.headers["content-type"] == "image/png"
+
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["setup_completed"] is False
+    assert health.json()["version"] == "0.1.0"
+    assert health.json()["license"] == "MIT OR Apache-2.0"
+    assert "Weien Xu" in health.json()["copyright"]
 
     models = client.get("/api/models")
     assert models.status_code == 200
     assert models.json()["online"] is False
+    assert isinstance(models.json()["installed"], bool)
     assert len(models.json()["recommended"]) >= 3
+
+
+def test_ollama_start_endpoint_when_missing(tmp_path: Path, monkeypatch: object) -> None:
+    import ocr_pipeline.web.server as srv
+
+    monkeypatch.setattr(srv, "start_ollama_service", lambda url: {"online": False, "installed": False, "started": False, "message": "not found"})  # type: ignore[attr-defined]
+    client = _make_test_app(tmp_path)
+    res = client.post("/api/ollama/start")
+    assert res.status_code == 200
+    assert res.json()["installed"] is False
 
 
 def test_settings_and_artifact_management(tmp_path: Path) -> None:

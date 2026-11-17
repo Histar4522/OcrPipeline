@@ -18,6 +18,7 @@ export const saveSettings = (payload) =>
   });
 
 export const fetchModels = () => requestJson("/api/models");
+export const startOllama = () => requestJson("/api/ollama/start", { method: "POST" });
 export const pullModel = (model) => {
   const fd = new FormData();
   fd.append("model", model);

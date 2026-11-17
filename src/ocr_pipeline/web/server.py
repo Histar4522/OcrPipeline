@@ -12,23 +12,26 @@ import uuid
 import zipfile
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 from rich.console import Console
 
 from . import __name__ as _pkg  # noqa: F401
+from .. import __version__
 from ..config import DEFAULT_SYSTEM_PROMPT, OcrConfig
 from ..discovery import DocumentTask, discover_documents
 from ..ollama_client import (
     OllamaError,
     check_ollama_ready,
     delete_model,
+    find_ollama_executable,
     list_models_detailed,
     ocr_image_b64,
     pull_model,
+    start_ollama_service,
 )
-from ..platform_utils import open_in_file_manager
+from ..platform_utils import generate_app_icon_image, open_in_file_manager
 from ..runner import OcrFn, ProgressEvent, run_pipeline
 from ..settings import AppSettings, default_jobs_dir, load_settings, save_settings
 
@@ -173,11 +176,20 @@ def create_app(
     def index() -> HTMLResponse:
         return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
 
+    @app.get("/api/icon.png")
+    def app_icon() -> Response:
+        buf = io.BytesIO()
+        generate_app_icon_image(64).save(buf, format="PNG")
+        return Response(content=buf.getvalue(), media_type="image/png")
+
     @app.get("/api/health")
     def health() -> dict:
         cfg = get_settings()
         return {
             "status": "ok",
+            "version": __version__,
+            "license": "MIT OR Apache-2.0",
+            "copyright": "Copyright (c) 2026 Weien Xu",
             "platform": platform.system(),
             "setup_completed": cfg.setup_completed,
         }
@@ -211,10 +223,12 @@ def create_app(
     @app.get("/api/models")
     def list_models() -> dict:
         cfg = get_settings()
+        installed = find_ollama_executable() is not None
         try:
             detailed = list_models_detailed(cfg.ollama_url, timeout=3.0)
             return {
                 "online": True,
+                "installed": True,
                 "models": [m["name"] for m in detailed],
                 "detailed": detailed,
                 "recommended": RECOMMENDED_MODELS,
@@ -224,6 +238,7 @@ def create_app(
         except httpx.HTTPError as exc:
             return {
                 "online": False,
+                "installed": installed,
                 "models": [],
                 "detailed": [],
                 "recommended": RECOMMENDED_MODELS,
@@ -231,6 +246,11 @@ def create_app(
                 "ollama_url": cfg.ollama_url,
                 "error": str(exc),
             }
+
+    @app.post("/api/ollama/start")
+    def start_ollama() -> dict:
+        cfg = get_settings()
+        return start_ollama_service(cfg.ollama_url)
 
     @app.post("/api/models/pull")
     def pull_ollama_model(model: str = Form(...)) -> dict:

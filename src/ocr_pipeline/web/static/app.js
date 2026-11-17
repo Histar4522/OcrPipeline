@@ -10,6 +10,7 @@ import {
   fileDownloadUrl,
   pullModel,
   startJob,
+  startOllama,
 } from "./api.js";
 import { initArtifactsView } from "./artifacts.js";
 import { initModelsView } from "./models.js";
@@ -52,18 +53,63 @@ function updatePullButton() {
   el("pullModelBtn").classList.toggle("d-none", !selected || pulled);
 }
 
+function setNewJobAvailability({ status, installed = false }) {
+  const fieldset = el("newJobFieldset");
+  const banner = el("ollamaLockBanner");
+  const msg = el("ollamaLockMsg");
+  const quickStart = el("quickStartOllamaBtn");
+
+  if (status === "online") {
+    fieldset.disabled = false;
+    fieldset.classList.remove("job-panel-disabled");
+    banner.classList.add("d-none");
+    return;
+  }
+
+  fieldset.disabled = true;
+  fieldset.classList.add("job-panel-disabled");
+  banner.classList.remove("d-none");
+  if (status === "connecting") {
+    banner.className = "alert alert-secondary py-2 px-3 small d-flex justify-content-between align-items-center gap-2 mb-3";
+    msg.textContent = "Connecting to Ollama...";
+    quickStart.classList.add("d-none");
+  } else {
+    banner.className = "alert alert-warning py-2 px-3 small d-flex justify-content-between align-items-center gap-2 mb-3";
+    msg.textContent = installed
+      ? "Ollama is installed but offline. Start Ollama to run OCR jobs."
+      : "Ollama is unavailable. Open Settings -> Setup Wizard to configure Ollama.";
+    quickStart.classList.toggle("d-none", !installed);
+  }
+}
+
 async function syncSettingsToJobForm() {
-  const [modelsData, settings] = await Promise.all([fetchModels(), fetchSettings()]);
   const badge = el("ollamaBadge");
+  badge.className = "badge text-bg-secondary";
+  badge.textContent = "Connecting Ollama...";
+  setNewJobAvailability({ status: "connecting" });
+
+  let modelsData;
+  let settings;
+  try {
+    [modelsData, settings] = await Promise.all([fetchModels(), fetchSettings()]);
+  } catch {
+    badge.className = "badge text-bg-danger";
+    badge.textContent = "Ollama Offline";
+    setNewJobAvailability({ status: "offline", installed: false });
+    return;
+  }
+
   const models = modelsData.models || [];
   state.pulledModels = models;
 
   if (modelsData.online) {
     badge.className = "badge text-bg-success";
     badge.textContent = `Ollama Online (${models.length})`;
+    setNewJobAvailability({ status: "online" });
   } else {
     badge.className = "badge text-bg-danger";
     badge.textContent = "Ollama Offline";
+    setNewJobAvailability({ status: "offline", installed: Boolean(modelsData.installed) });
   }
 
   const defaults = ["glm-ocr", "deepseek-ocr", "qwen3-vl:4b", "qwen3-vl:8b"];
@@ -225,17 +271,35 @@ const artifactsView = initArtifactsView({ showToast });
 const modelsView = initModelsView({ showToast, onModelsChanged: syncSettingsToJobForm });
 const settingsWizard = initSettingsAndWizard({ showToast, onSettingsSaved: syncSettingsToJobForm });
 
-document.querySelectorAll("#mainNav [data-view]").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll("#mainNav [data-view]").forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    document.querySelectorAll(".app-view").forEach((v) => v.classList.add("d-none"));
-    const target = btn.dataset.view;
-    el(target).classList.remove("d-none");
-    if (target === "artifactsView") artifactsView.refresh();
-    if (target === "modelsView") modelsView.refresh();
-    if (target === "settingsView") settingsWizard.loadSettingsForm();
+function switchView(target) {
+  document.querySelectorAll("#mainNav [data-view]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.view === target);
   });
+  document.querySelectorAll(".app-view").forEach((v) => v.classList.add("d-none"));
+  el(target).classList.remove("d-none");
+  if (target === "artifactsView") artifactsView.refresh();
+  if (target === "modelsView") modelsView.refresh();
+  if (target === "settingsView") settingsWizard.loadSettingsForm();
+}
+
+document.querySelectorAll("#mainNav [data-view]").forEach((btn) => {
+  btn.addEventListener("click", () => switchView(btn.dataset.view));
+});
+
+el("navRefreshBtn").addEventListener("click", syncSettingsToJobForm);
+el("quickSettingsBtn").addEventListener("click", () => switchView("settingsView"));
+el("quickStartOllamaBtn").addEventListener("click", async () => {
+  const btn = el("quickStartOllamaBtn");
+  btn.disabled = true;
+  btn.textContent = "Starting...";
+  try {
+    const res = await startOllama();
+    showToast("Ollama", res.message, res.online ? "success" : "warning");
+    await syncSettingsToJobForm();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Start Ollama";
+  }
 });
 
 el("modelSelect").addEventListener("change", updatePullButton);
@@ -321,8 +385,14 @@ el("jobForm").addEventListener("submit", async (e) => {
 });
 
 (async () => {
+  const health = await fetchHealth();
+  el("aboutVersion").textContent = `v${health.version}`;
+  el("aboutLicense").textContent = health.license;
+  el("aboutCopyright").textContent = health.copyright;
+  el("footerVersion").textContent = `OcrPipeline v${health.version}`;
+  el("footerLicense").textContent = `${health.license} · ${health.copyright}`;
+
   await syncSettingsToJobForm();
   renderJobHistory(await fetchJobs());
-  const health = await fetchHealth();
   if (!health.setup_completed) await settingsWizard.openWizard();
 })();
