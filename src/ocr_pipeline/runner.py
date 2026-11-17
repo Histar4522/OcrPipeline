@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import inspect
 import logging
@@ -20,6 +21,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from .artifacts import format_frontmatter, normalize_tags
 from .config import OcrConfig
 from .discovery import DocumentTask
 from .ollama_client import JobCancelledError, ocr_image_b64
@@ -39,6 +41,8 @@ class ProgressEvent:
     current_doc: str = ""
     current_page: int = 0
     total_pages: int = 0
+    elapsed_seconds: float = 0.0
+    eta_seconds: float | None = None
     status: str = "running"
 
 
@@ -121,9 +125,24 @@ def run_pipeline(
     logger = _setup_logger(resolved_output)
     ui = console or Console()
     summary = RunSummary(total_docs=len(tasks))
+    run_start = time.monotonic()
+    ocr_durations: list[float] = []
+    pending_pages_total = sum(
+        _total_pages_for_task(t) for t in tasks if config.force or not t.output_path.exists()
+    )
+    pages_done_overall = 0
 
     def is_cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
+
+    def compute_eta() -> float | None:
+        remaining = max(0, pending_pages_total - pages_done_overall)
+        if remaining == 0:
+            return 0.0
+        if not ocr_durations:
+            return None
+        avg = sum(ocr_durations) / len(ocr_durations)
+        return round(avg * remaining, 1)
 
     def emit(doc: str = "", page: int = 0, pages: int = 0, status: str = "running") -> None:
         if on_progress is not None:
@@ -136,6 +155,8 @@ def run_pipeline(
                     current_doc=doc,
                     current_page=page,
                     total_pages=pages,
+                    elapsed_seconds=round(time.monotonic() - run_start, 1),
+                    eta_seconds=compute_eta(),
                     status=status,
                 )
             )
@@ -205,6 +226,7 @@ def run_pipeline(
                                 break
                             cache_file.write_text(text, encoding="utf-8")
                             elapsed = time.perf_counter() - t0
+                            ocr_durations.append(elapsed)
                             logger.info(
                                 "OK: %s page %d/%d (%.2fs)",
                                 task.display_name,
@@ -234,6 +256,7 @@ def run_pipeline(
                         page_outputs.append(f"<!-- Page {page_num} -->\n\n{text}")
                     else:
                         page_outputs.append(text)
+                    pages_done_overall += 1
                     progress.advance(page_bar)
                     emit(doc=task.display_name, page=page_num, pages=total_pages)
 
@@ -244,7 +267,23 @@ def run_pipeline(
 
                 task.output_path.parent.mkdir(parents=True, exist_ok=True)
                 separator = "\n\n---\n\n"
-                task.output_path.write_text(separator.join(page_outputs) + "\n", encoding="utf-8")
+                body = separator.join(page_outputs) + "\n"
+                cleaned_tags = normalize_tags(list(config.tags))
+                if config.obsidian_mode or cleaned_tags:
+                    meta: dict[str, object] = {
+                        "title": task.output_path.stem,
+                        "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "source": task.display_name,
+                        "model": config.model,
+                    }
+                    if cleaned_tags:
+                        meta["tags"] = cleaned_tags
+                    if config.obsidian_mode:
+                        meta["ocr_pipeline"] = True
+                    final_content = format_frontmatter(meta, body)
+                else:
+                    final_content = body
+                task.output_path.write_text(final_content, encoding="utf-8")
                 summary.processed_docs += 1
                 logger.info(
                     "SAVED: %s -> %s (failed_pages=%d)",

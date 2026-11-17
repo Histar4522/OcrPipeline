@@ -6,6 +6,7 @@ from pathlib import Path
 
 from platformdirs import user_config_dir, user_data_dir
 
+from .artifacts import ensure_obsidian_vault
 from .config import DEFAULT_SYSTEM_PROMPT
 
 APP_NAME = "OcrPipeline"
@@ -40,6 +41,7 @@ class AppSettings:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     minimize_to_tray: bool = True
     desktop_notifications: bool = True
+    obsidian_mode: bool = False
 
     def __post_init__(self) -> None:
         if not self.archive_dir:
@@ -69,6 +71,9 @@ def save_settings(settings: AppSettings, config_path: Path | None = None) -> Pat
     path = config_path or default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     if settings.archive_dir:
-        Path(settings.archive_dir).expanduser().mkdir(parents=True, exist_ok=True)
+        archive_path = Path(settings.archive_dir).expanduser()
+        archive_path.mkdir(parents=True, exist_ok=True)
+        if settings.obsidian_mode:
+            ensure_obsidian_vault(archive_path)
     path.write_text(json.dumps(settings.to_dict(), indent=2), encoding="utf-8")
     return path

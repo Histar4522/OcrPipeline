@@ -19,6 +19,13 @@ from rich.console import Console
 
 from . import __name__ as _pkg  # noqa: F401
 from .. import __version__
+from ..artifacts import (
+    ensure_obsidian_vault,
+    normalize_tags,
+    sanitize_rel_folder,
+    scan_artifacts,
+    update_artifact_tags,
+)
 from ..config import DEFAULT_SYSTEM_PROMPT, OcrConfig
 from ..discovery import DocumentTask, discover_documents
 from ..ollama_client import (
@@ -93,6 +100,10 @@ class JobState:
     current_doc: str = ""
     current_page: int = 0
     total_pages: int = 0
+    elapsed_seconds: float = 0.0
+    eta_seconds: float | None = None
+    folder: str = ""
+    tags: list[str] = field(default_factory=list)
     error: str = ""
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     active_client: httpx.Client | None = field(default=None, repr=False)
@@ -120,6 +131,10 @@ class JobState:
             "current_doc": self.current_doc,
             "current_page": self.current_page,
             "total_pages": self.total_pages,
+            "elapsed_seconds": self.elapsed_seconds,
+            "eta_seconds": self.eta_seconds,
+            "folder": self.folder,
+            "tags": self.tags,
             "error": self.error,
             "files": files,
         }
@@ -274,26 +289,29 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/api/artifacts")
-    def list_artifacts() -> dict:
+    def list_artifacts(
+        q: str = Query(""),
+        folder: str = Query(""),
+        tag: str = Query(""),
+        sort: str = Query("newest"),
+    ) -> dict:
         cfg = get_settings()
-        archive_dir = Path(cfg.archive_dir).expanduser().resolve()
-        items: list[dict] = []
-        if archive_dir.exists():
-            for md_file in sorted(archive_dir.rglob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
-                if ".ocr_cache" in md_file.parts:
-                    continue
-                stat = md_file.stat()
-                snippet = md_file.read_text(encoding="utf-8", errors="replace")[:180].strip()
-                items.append(
-                    {
-                        "path": md_file.relative_to(archive_dir).as_posix(),
-                        "name": md_file.name,
-                        "size_bytes": stat.st_size,
-                        "modified_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
-                        "preview": snippet,
-                    }
-                )
-        return {"archive_dir": str(archive_dir), "artifacts": items}
+        result = scan_artifacts(Path(cfg.archive_dir), query=q, folder=folder, tag=tag, sort=sort)
+        result["obsidian_mode"] = cfg.obsidian_mode
+        return result
+
+    @app.post("/api/artifacts/folder")
+    def create_artifact_folder(payload: dict = Body(...)) -> dict:
+        cfg = get_settings()
+        rel = sanitize_rel_folder(str(payload.get("folder", "")))
+        if not rel.parts:
+            raise HTTPException(status_code=400, detail="Folder name is required.")
+        root_dir = Path(cfg.archive_dir).expanduser().resolve()
+        target = (root_dir / rel).resolve()
+        if not target.is_relative_to(root_dir):
+            raise HTTPException(status_code=400, detail="Invalid folder path.")
+        target.mkdir(parents=True, exist_ok=True)
+        return {"ok": True, "folder": target.relative_to(root_dir).as_posix()}
 
     @app.get("/api/artifacts/content")
     def get_artifact_content(path: str = Query(...), download: bool = False) -> FileResponse:
@@ -305,26 +323,66 @@ def create_app(
             return FileResponse(target, filename=target.name, media_type="text/markdown")
         return FileResponse(target, media_type="text/plain; charset=utf-8")
 
+    @app.patch("/api/artifacts/move")
     @app.patch("/api/artifacts/rename")
-    def rename_artifact(payload: dict = Body(...)) -> dict:
+    def move_or_rename_artifact(payload: dict = Body(...)) -> dict:
         cfg = get_settings()
-        archive_dir = Path(cfg.archive_dir)
+        archive_dir = Path(cfg.archive_dir).expanduser().resolve()
         old_rel = str(payload.get("path", "")).strip()
-        new_name = str(payload.get("new_name", "")).strip()
-        if not old_rel or not new_name:
-            raise HTTPException(status_code=400, detail="Both path and new_name are required.")
+        if not old_rel:
+            raise HTTPException(status_code=400, detail="path is required.")
+        src = _resolve_artifact_path(archive_dir, old_rel)
+        if not src.is_file():
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+
+        new_name = str(payload.get("new_name", "")).strip() or src.name
         if "/" in new_name or "\\" in new_name or ".." in new_name:
             raise HTTPException(status_code=400, detail="Invalid filename.")
         if not new_name.lower().endswith(".md"):
             new_name += ".md"
-        src = _resolve_artifact_path(archive_dir, old_rel)
-        if not src.is_file():
-            raise HTTPException(status_code=404, detail="Artifact not found.")
-        dst = (src.parent / new_name).resolve()
-        if dst.exists():
-            raise HTTPException(status_code=409, detail="An artifact with that name already exists.")
+
+        if "target_folder" in payload:
+            rel_folder = sanitize_rel_folder(str(payload.get("target_folder") or ""))
+            dst_dir = (archive_dir / rel_folder).resolve()
+        else:
+            dst_dir = src.parent
+        if not dst_dir.is_relative_to(archive_dir):
+            raise HTTPException(status_code=400, detail="Invalid target folder.")
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = (dst_dir / new_name).resolve()
+        if dst != src and dst.exists():
+            raise HTTPException(status_code=409, detail="An artifact with that name already exists there.")
         src.rename(dst)
-        return {"ok": True, "path": dst.relative_to(archive_dir.expanduser().resolve()).as_posix()}
+        return {"ok": True, "path": dst.relative_to(archive_dir).as_posix()}
+
+    @app.patch("/api/artifacts/tags")
+    def patch_artifact_tags(payload: dict = Body(...)) -> dict:
+        cfg = get_settings()
+        rel = str(payload.get("path", "")).strip()
+        if not rel:
+            raise HTTPException(status_code=400, detail="path is required.")
+        target = _resolve_artifact_path(Path(cfg.archive_dir), rel)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+        raw_tags = payload.get("tags", [])
+        tags = normalize_tags(raw_tags if isinstance(raw_tags, (list, str)) else [])
+        updated = update_artifact_tags(target, tags)
+        return {"ok": True, "tags": updated}
+
+    @app.post("/api/artifacts/obsidian")
+    def open_in_obsidian(payload: dict = Body(default={})) -> dict:
+        from urllib.parse import quote
+        import webbrowser
+
+        cfg = get_settings()
+        archive_dir = Path(cfg.archive_dir).expanduser().resolve()
+        ensure_obsidian_vault(archive_dir)
+        rel = str(payload.get("path", "")).strip()
+        uri = f"obsidian://open?vault={quote(archive_dir.name)}"
+        if rel:
+            uri += f"&file={quote(rel)}"
+        webbrowser.open(uri)
+        return {"ok": True, "uri": uri}
 
     @app.delete("/api/artifacts")
     def delete_artifact(path: str = Query(...)) -> dict:
@@ -356,6 +414,9 @@ def create_app(
         source_mode: str = Form("upload"),
         local_input_path: str = Form(""),
         local_output_path: str = Form(""),
+        job_name: str = Form(""),
+        folder: str = Form(""),
+        tags: str = Form(""),
         model: str = Form(""),
         dpi: int = Form(0),
         max_dim: int = Form(0),
@@ -367,25 +428,30 @@ def create_app(
         job_id = uuid.uuid4().hex[:10]
         job_dir = root / job_id
         archive_base = Path(settings.archive_dir).expanduser()
+        rel_folder = sanitize_rel_folder(folder)
+        clean_name = job_name.strip().replace("/", "_").replace("\\", "_")
+        parsed_tags = normalize_tags(tags)
 
         if source_mode == "local":
             if not local_input_path.strip():
                 raise HTTPException(status_code=400, detail="Local input path is required.")
             input_path = Path(local_input_path.strip()).expanduser()
-            output_dir = (
-                Path(local_output_path.strip()).expanduser()
-                if local_output_path.strip()
-                else archive_base / f"{input_path.stem or 'batch'}_{job_id[:6]}"
-            )
-            label = input_path.name or str(input_path)
+            default_sub = archive_base / rel_folder if rel_folder.parts else archive_base / f"{input_path.stem or 'batch'}_{job_id[:6]}"
+            output_dir = Path(local_output_path.strip()).expanduser() if local_output_path.strip() else default_sub
+            label = clean_name or input_path.name or str(input_path)
         else:
             valid_files = [f for f in files if f.filename]
             if not valid_files:
                 raise HTTPException(status_code=400, detail="Please select at least one PDF or image.")
             input_path = job_dir / "input"
-            output_dir = archive_base / f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{job_id[:4]}"
+            if rel_folder.parts:
+                output_dir = archive_base / rel_folder
+            elif clean_name:
+                output_dir = archive_base
+            else:
+                output_dir = archive_base / f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{job_id[:4]}"
             _save_uploads(valid_files, input_path)
-            label = f"{len(valid_files)} uploaded file(s)"
+            label = clean_name or f"{len(valid_files)} uploaded file(s)"
 
         config = OcrConfig(
             model=model.strip() or settings.default_model,
@@ -393,6 +459,8 @@ def create_app(
             dpi=max(72, min(dpi or settings.dpi, 600)),
             max_image_dim=max(512, min(max_dim or settings.max_image_dim, 4096)),
             num_ctx=settings.num_ctx,
+            obsidian_mode=settings.obsidian_mode,
+            tags=tuple(parsed_tags),
             system_prompt=settings.system_prompt,
             force=force,
         )
@@ -404,6 +472,16 @@ def create_app(
 
         if not tasks:
             raise HTTPException(status_code=400, detail="No PDF or image files found in input.")
+
+        if clean_name and len(tasks) == 1:
+            t0 = tasks[0]
+            stem = clean_name[:-3] if clean_name.lower().endswith(".md") else clean_name
+            tasks[0] = DocumentTask(
+                kind=t0.kind,
+                source_paths=t0.source_paths,
+                output_path=t0.output_path.with_name(f"{stem}.md"),
+                display_name=clean_name,
+            )
 
         if ocr_fn is None:
             try:
@@ -418,6 +496,8 @@ def create_app(
             output_dir=output_dir.resolve(),
             model=config.model,
             dpi=config.dpi,
+            folder=rel_folder.as_posix() if rel_folder.parts else "",
+            tags=parsed_tags,
             total_docs=len(tasks),
         )
         with lock:
@@ -432,6 +512,8 @@ def create_app(
                 state.current_doc = ev.current_doc
                 state.current_page = ev.current_page
                 state.total_pages = ev.total_pages
+                state.elapsed_seconds = ev.elapsed_seconds
+                state.eta_seconds = ev.eta_seconds
                 state.status = ev.status
 
         def on_client_ready(client: httpx.Client) -> None:

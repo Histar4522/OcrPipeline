@@ -7,6 +7,7 @@
   <link rel="icon" type="image/png" href="/api/icon.png" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" rel="stylesheet" />
   <link href="/static/style.css" rel="stylesheet" />
 </head>
 <body class="bg-body-tertiary d-flex flex-column min-vh-100">
@@ -108,6 +109,18 @@
                 </div>
 
                 <div class="row g-2 mb-3">
+                  <div class="col-6">
+                    <label class="form-label small fw-semibold">Output Name</label>
+                    <input id="jobNameInput" type="text" class="form-control form-control-sm" placeholder="Optional (e.g. Lecture_01)" />
+                  </div>
+                  <div class="col-6">
+                    <label class="form-label small fw-semibold">Archive Folder</label>
+                    <input id="jobFolderInput" type="text" class="form-control form-control-sm" placeholder="e.g. Notes/Math" />
+                  </div>
+                  <div class="col-12">
+                    <label class="form-label small fw-semibold">Tags</label>
+                    <input id="jobTagsInput" type="text" class="form-control form-control-sm" placeholder="Comma-separated (e.g. handwritten, math)" />
+                  </div>
                   <div class="col-12">
                     <label class="form-label small fw-semibold">Ollama OCR / Vision Model</label>
                     <div class="input-group input-group-sm">
@@ -181,7 +194,10 @@
                 </div>
               </div>
               <div class="card-body">
-                <div class="small text-muted mb-2" id="detailMeta"></div>
+                <div class="d-flex flex-wrap justify-content-between align-items-center small text-muted mb-2 gap-2">
+                  <span id="detailMeta"></span>
+                  <span id="detailTiming" class="fw-semibold text-primary"></span>
+                </div>
                 <div class="mb-2">
                   <div class="d-flex justify-content-between small mb-1">
                     <span>Documents</span>
@@ -248,12 +264,28 @@
         <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
           <div>
             <span class="fw-semibold"><i class="bi bi-archive me-1"></i> Artifact Archive</span>
+            <span id="obsidianBadge" class="badge text-bg-info ms-2 d-none">Obsidian Vault</span>
             <span id="artifactDirLabel" class="small text-muted ms-2"></span>
           </div>
-          <div class="d-flex gap-2">
-            <input id="artifactSearchInput" type="search" class="form-control form-control-sm" placeholder="Filter artifacts..." />
+          <div class="d-flex flex-wrap gap-2">
+            <input id="artifactSearchInput" type="search" class="form-control form-control-sm" style="width: 180px;" placeholder="Search name, tag, text..." />
+            <select id="artifactFolderSelect" class="form-select form-select-sm" style="width: 140px;">
+              <option value="">All Folders</option>
+            </select>
+            <select id="artifactTagSelect" class="form-select form-select-sm" style="width: 130px;">
+              <option value="">All Tags</option>
+            </select>
+            <select id="artifactSortSelect" class="form-select form-select-sm" style="width: 120px;">
+              <option value="newest">Newest</option>
+              <option value="oldest">Oldest</option>
+              <option value="name">Name A-Z</option>
+              <option value="size">Largest</option>
+            </select>
+            <button id="newFolderBtn" class="btn btn-sm btn-outline-secondary text-nowrap" type="button">
+              <i class="bi bi-folder-plus me-1"></i>New Folder
+            </button>
             <button id="openArchiveFolderBtn" class="btn btn-sm btn-outline-secondary text-nowrap" type="button">
-              <i class="bi bi-folder2-open me-1"></i> Open Folder
+              <i class="bi bi-folder2-open me-1"></i>Open Folder
             </button>
             <button id="refreshArtifactsBtn" class="btn btn-sm btn-outline-primary" type="button">
               <i class="bi bi-arrow-clockwise"></i>
@@ -267,12 +299,17 @@
             </div>
             <div class="col-lg-7">
               <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-                <span id="artifactSelectedPath" class="small fw-semibold text-muted">Select an artifact</span>
+                <div>
+                  <span id="artifactSelectedPath" class="small fw-semibold text-muted">Select an artifact</span>
+                  <div id="artifactSelectedTags" class="d-flex flex-wrap gap-1 mt-1"></div>
+                </div>
                 <div class="btn-group btn-group-sm">
                   <button id="artifactRawBtn" class="btn btn-outline-secondary" type="button">Raw</button>
                   <button id="artifactCopyBtn" class="btn btn-outline-secondary" type="button">Copy</button>
-                  <button id="artifactRenameBtn" class="btn btn-outline-secondary" type="button" disabled>Rename</button>
+                  <button id="artifactTagsBtn" class="btn btn-outline-secondary" type="button" disabled>Tags</button>
+                  <button id="artifactRenameBtn" class="btn btn-outline-secondary" type="button" disabled>Move/Rename</button>
                   <button id="artifactRevealBtn" class="btn btn-outline-secondary" type="button" disabled>Folder</button>
+                  <button id="artifactObsidianBtn" class="btn btn-outline-info d-none" type="button" disabled>Obsidian</button>
                   <a id="artifactDownloadBtn" class="btn btn-outline-primary disabled" href="#">Download</a>
                   <button id="artifactDeleteBtn" class="btn btn-outline-danger" type="button" disabled>Delete</button>
                 </div>
@@ -366,16 +403,22 @@
               </div>
               <textarea id="setSystemPrompt" class="form-control form-control-sm" rows="5"></textarea>
             </div>
-            <div class="col-md-6">
+            <div class="col-md-4">
               <div class="form-check form-switch">
                 <input id="setMinimizeTray" class="form-check-input" type="checkbox" />
-                <label class="form-check-label small" for="setMinimizeTray">Minimize to system tray on window close</label>
+                <label class="form-check-label small" for="setMinimizeTray">Minimize to tray on close</label>
               </div>
             </div>
-            <div class="col-md-6">
+            <div class="col-md-4">
               <div class="form-check form-switch">
                 <input id="setDesktopNotify" class="form-check-input" type="checkbox" />
-                <label class="form-check-label small" for="setDesktopNotify">Send desktop toast when a job finishes</label>
+                <label class="form-check-label small" for="setDesktopNotify">Toast when job finishes</label>
+              </div>
+            </div>
+            <div class="col-md-4">
+              <div class="form-check form-switch">
+                <input id="setObsidianMode" class="form-check-input" type="checkbox" />
+                <label class="form-check-label small" for="setObsidianMode">Obsidian Vault Mode</label>
               </div>
             </div>
             <div class="col-12 d-flex justify-content-between align-items-center">
@@ -434,9 +477,10 @@
             <div class="list-group-item">
               <div class="fw-semibold mb-1">3. Archive Output Folder & Desktop Behavior</div>
               <input id="wizArchiveDir" type="text" class="form-control form-control-sm mb-2" />
-              <div class="d-flex gap-4 small">
+              <div class="d-flex flex-wrap gap-3 small">
                 <label class="form-check-label"><input id="wizTray" type="checkbox" class="form-check-input me-1" checked />Keep in tray on close</label>
                 <label class="form-check-label"><input id="wizNotify" type="checkbox" class="form-check-input me-1" checked />OS toast notifications</label>
+                <label class="form-check-label"><input id="wizObsidian" type="checkbox" class="form-check-input me-1" />Obsidian Vault integration</label>
               </div>
             </div>
           </div>
@@ -453,6 +497,8 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
   <script type="module" src="/static/app.js"></script>
 </body>
 </html>

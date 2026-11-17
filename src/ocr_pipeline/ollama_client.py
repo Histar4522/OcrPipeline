@@ -121,61 +121,94 @@ def find_ollama_executable() -> str | None:
     return None
 
 
-def start_ollama_service(base_url: str, wait_seconds: float = 8.0) -> dict:
-    """Attempt to start `ollama serve` in the background if Ollama is installed but offline."""
-    tags_url = f"{base_url.rstrip('/')}/api/tags"
+_OLLAMA_LAUNCH_LOCK = threading.Lock()
+
+
+def _is_ollama_process_running() -> bool:
+    """Return True if an Ollama server/app process is already active."""
     try:
-        resp = httpx.get(tags_url, timeout=1.5)
-        if resp.status_code == 200:
-            return {"online": True, "installed": True, "started": False, "message": "Ollama is already running."}
-    except httpx.HTTPError:
+        import psutil
+
+        for proc in psutil.process_iter(["name"]):
+            name = (proc.info.get("name") or "").lower()
+            if name in ("ollama", "ollama.exe", "ollama app.exe"):
+                return True
+    except Exception:
         pass
+    return False
 
-    exe = find_ollama_executable()
-    if not exe:
-        return {
-            "online": False,
-            "installed": False,
-            "started": False,
-            "message": "Ollama executable was not found on this machine.",
-        }
 
-    kwargs: dict = {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
-    if platform.system() == "Windows":
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-        kwargs["creationflags"] = flags
-    else:
-        kwargs["start_new_session"] = True
-
-    try:
-        subprocess.Popen([exe, "serve"], **kwargs)
-    except OSError as exc:
-        return {
-            "online": False,
-            "installed": True,
-            "started": False,
-            "message": f"Failed to launch Ollama: {exc}",
-        }
-
+def _poll_ollama_ready(tags_url: str, wait_seconds: float) -> bool:
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         try:
             resp = httpx.get(tags_url, timeout=1.0)
             if resp.status_code == 200:
-                return {"online": True, "installed": True, "started": True, "message": "Ollama started."}
+                return True
         except httpx.HTTPError:
             time.sleep(0.35)
+    return False
 
-    return {
-        "online": False,
-        "installed": True,
-        "started": False,
-        "message": "Launched Ollama, but the server did not respond in time.",
-    }
+
+def start_ollama_service(base_url: str, wait_seconds: float = 20.0) -> dict:
+    """Attempt to start `ollama serve` silently if Ollama is installed but offline."""
+    tags_url = f"{base_url.rstrip('/')}/api/tags"
+    with _OLLAMA_LAUNCH_LOCK:
+        try:
+            resp = httpx.get(tags_url, timeout=1.5)
+            if resp.status_code == 200:
+                return {"online": True, "installed": True, "started": False, "message": "Ollama is already running."}
+        except httpx.HTTPError:
+            pass
+
+        exe = find_ollama_executable()
+        if not exe:
+            return {
+                "online": False,
+                "installed": False,
+                "started": False,
+                "message": "Ollama executable was not found on this machine.",
+            }
+
+        already_running = _is_ollama_process_running()
+        started_new = False
+        if not already_running:
+            kwargs: dict = {
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if platform.system() == "Windows":
+                # Use CREATE_NO_WINDOW alone (not DETACHED_PROCESS) + SW_HIDE so child probes don't flash consoles
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+                kwargs["startupinfo"] = startupinfo
+            else:
+                kwargs["start_new_session"] = True
+
+            try:
+                subprocess.Popen([exe, "serve"], **kwargs)
+                started_new = True
+            except OSError as exc:
+                return {
+                    "online": False,
+                    "installed": True,
+                    "started": False,
+                    "message": f"Failed to launch Ollama: {exc}",
+                }
+
+        if _poll_ollama_ready(tags_url, wait_seconds):
+            msg = "Ollama started." if started_new else "Ollama finished starting up."
+            return {"online": True, "installed": True, "started": started_new, "message": msg}
+
+        return {
+            "online": False,
+            "installed": True,
+            "started": started_new,
+            "message": "Ollama is still warming up. Click Refresh in a moment.",
+        }
 
 
 def ocr_image_b64(

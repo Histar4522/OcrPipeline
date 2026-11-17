@@ -30,5 +30,7 @@ class OcrConfig:
     max_retries: int = 2
     force: bool = False
     include_page_headers: bool = True
+    obsidian_mode: bool = False
+    tags: tuple[str, ...] = ()
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     user_prompt: str = DEFAULT_USER_PROMPT

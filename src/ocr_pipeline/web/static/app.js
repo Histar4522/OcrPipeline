@@ -13,6 +13,7 @@ import {
   startOllama,
 } from "./api.js";
 import { initArtifactsView } from "./artifacts.js";
+import { renderMarkdownContent } from "./markdown.js";
 import { initModelsView } from "./models.js";
 import { initSettingsAndWizard } from "./settings_wizard.js";
 
@@ -164,17 +165,12 @@ function renderJobHistory(jobs) {
 }
 
 function renderMarkdown() {
-  const container = el("markdownPreview");
-  if (!state.rawMarkdown) {
-    container.innerHTML = '<span class="text-muted small">Select an output file to preview.</span>';
-    return;
-  }
-  if (state.rawMode) {
-    container.innerHTML = '<pre class="mb-0 small"></pre>';
-    container.querySelector("pre").textContent = state.rawMarkdown;
-  } else {
-    container.innerHTML = window.marked.parse(state.rawMarkdown);
-  }
+  renderMarkdownContent(
+    el("markdownPreview"),
+    state.rawMarkdown,
+    state.rawMode,
+    "Select an output file to preview."
+  );
 }
 
 async function openOutputFile(jobId, filePath) {
@@ -184,6 +180,17 @@ async function openOutputFile(jobId, filePath) {
   el("downloadFileBtn").classList.remove("disabled");
   state.rawMarkdown = await fetchJobFile(jobId, filePath);
   renderMarkdown();
+}
+
+function formatDuration(sec) {
+  if (sec === null || sec === undefined || Number.isNaN(sec)) return "--";
+  const total = Math.max(0, Math.round(sec));
+  const hrs = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const rem = total % 60;
+  if (hrs > 0) return `${hrs}h ${mins}m ${rem}s`;
+  if (mins > 0) return `${mins}m ${rem}s`;
+  return `${rem}s`;
 }
 
 function renderJobDetail(job) {
@@ -196,6 +203,13 @@ function renderJobDetail(job) {
   badge.className = `badge ms-2 ${badgeMap[job.status] || "text-bg-secondary"}`;
   badge.textContent = job.status;
   el("detailMeta").textContent = `Model: ${job.model} | DPI: ${job.dpi} | Output: ${job.output_dir}`;
+  const etaText =
+    job.status === "completed"
+      ? "Done"
+      : job.eta_seconds !== null && job.eta_seconds !== undefined
+        ? `~${formatDuration(job.eta_seconds)}`
+        : "Calculating...";
+  el("detailTiming").textContent = `Elapsed: ${formatDuration(job.elapsed_seconds)} · ETA: ${etaText}`;
 
   const isActive = job.status === "queued" || job.status === "running";
   el("cancelJobBtn").classList.toggle("d-none", !isActive);
@@ -292,10 +306,13 @@ el("quickStartOllamaBtn").addEventListener("click", async () => {
   const btn = el("quickStartOllamaBtn");
   btn.disabled = true;
   btn.textContent = "Starting...";
+  el("ollamaLockMsg").textContent = "Starting Ollama service (this may take a few seconds)...";
   try {
     const res = await startOllama();
     showToast("Ollama", res.message, res.online ? "success" : "warning");
     await syncSettingsToJobForm();
+  } catch (err) {
+    showToast("Ollama", err.message, "danger");
   } finally {
     btn.disabled = false;
     btn.textContent = "Start Ollama";
@@ -362,6 +379,9 @@ el("jobForm").addEventListener("submit", async (e) => {
   fd.append("source_mode", state.sourceMode);
   fd.append("local_input_path", el("localInputPath").value);
   fd.append("local_output_path", el("localOutputPath").value);
+  fd.append("job_name", el("jobNameInput").value);
+  fd.append("folder", el("jobFolderInput").value);
+  fd.append("tags", el("jobTagsInput").value);
   fd.append("model", el("modelSelect").value);
   fd.append("dpi", el("dpiInput").value);
   fd.append("max_dim", el("maxDimInput").value);

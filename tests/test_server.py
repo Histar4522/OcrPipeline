@@ -39,10 +39,12 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert home.status_code == 200
     assert "OcrPipeline" in home.text
     assert "bootstrap" in home.text.lower()
+    assert "katex" in home.text.lower()
 
-    js = client.get("/static/app.js")
-    assert js.status_code == 200
-    assert js.headers["content-type"].startswith(("application/javascript", "text/javascript"))
+    for asset in ("/static/app.js", "/static/markdown.js"):
+        js = client.get(asset)
+        assert js.status_code == 200
+        assert js.headers["content-type"].startswith(("application/javascript", "text/javascript"))
 
     icon = client.get("/api/icon.png")
     assert icon.status_code == 200
@@ -75,30 +77,96 @@ def test_ollama_start_endpoint_when_missing(tmp_path: Path, monkeypatch: object)
 def test_settings_and_artifact_management(tmp_path: Path) -> None:
     client = _make_test_app(tmp_path)
 
-    updated = client.put("/api/settings", json={"dpi": 300, "setup_completed": True, "default_model": "glm-ocr"})
+    updated = client.put(
+        "/api/settings",
+        json={"dpi": 300, "setup_completed": True, "default_model": "glm-ocr", "obsidian_mode": True},
+    )
     assert updated.status_code == 200
     assert updated.json()["dpi"] == 300
     assert updated.json()["setup_completed"] is True
+    assert updated.json()["obsidian_mode"] is True
 
     archive_dir = tmp_path / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    (archive_dir / "note1.md").write_text("# Sample Note\nHello world", encoding="utf-8")
+    assert (archive_dir / ".obsidian" / "app.json").exists()
 
-    listed = client.get("/api/artifacts")
+    folder_resp = client.post("/api/artifacts/folder", json={"folder": "Physics/Mechanics"})
+    assert folder_resp.status_code == 200
+    assert folder_resp.json()["folder"] == "Physics/Mechanics"
+
+    (archive_dir / "note1.md").write_text("# Sample Note\nQuantum mechanics #physics", encoding="utf-8")
+
+    listed = client.get("/api/artifacts", params={"q": "quantum", "tag": "physics"})
     assert listed.status_code == 200
     assert [a["path"] for a in listed.json()["artifacts"]] == ["note1.md"]
+    assert listed.json()["obsidian_mode"] is True
 
-    content = client.get("/api/artifacts/content", params={"path": "note1.md"})
+    tagged = client.patch("/api/artifacts/tags", json={"path": "note1.md", "tags": ["lecture", "exam"]})
+    assert tagged.status_code == 200
+    assert tagged.json()["tags"] == ["lecture", "exam"]
+
+    moved = client.patch(
+        "/api/artifacts/move",
+        json={"path": "note1.md", "new_name": "renamed_note", "target_folder": "Physics/Mechanics"},
+    )
+    assert moved.status_code == 200
+    assert moved.json()["path"] == "Physics/Mechanics/renamed_note.md"
+
+    filtered = client.get("/api/artifacts", params={"folder": "Physics", "tag": "exam"})
+    assert [a["path"] for a in filtered.json()["artifacts"]] == ["Physics/Mechanics/renamed_note.md"]
+
+    content = client.get("/api/artifacts/content", params={"path": "Physics/Mechanics/renamed_note.md"})
     assert content.status_code == 200
-    assert "Hello world" in content.text
+    assert "Quantum mechanics" in content.text
 
-    renamed = client.patch("/api/artifacts/rename", json={"path": "note1.md", "new_name": "renamed_note"})
-    assert renamed.status_code == 200
-    assert renamed.json()["path"] == "renamed_note.md"
-
-    deleted = client.delete("/api/artifacts", params={"path": "renamed_note.md"})
+    deleted = client.delete("/api/artifacts", params={"path": "Physics/Mechanics/renamed_note.md"})
     assert deleted.status_code == 200
     assert client.get("/api/artifacts").json()["artifacts"] == []
+
+
+def test_job_naming_folder_tags_obsidian_and_eta(tmp_path: Path) -> None:
+    seen_eta: list[float | None] = []
+
+    def fake_ocr(image_b64: str, cfg: OcrConfig, client: object) -> str:
+        time.sleep(0.02)
+        return "Integral calculus notes"
+
+    client = _make_test_app(tmp_path, ocr_fn=fake_ocr)
+    client.put("/api/settings", json={"obsidian_mode": True})
+
+    resp = client.post(
+        "/api/jobs",
+        data={
+            "source_mode": "upload",
+            "job_name": "Calculus_Week1",
+            "folder": "Math/Notes",
+            "tags": "calculus, handwritten",
+            "series_mode": "true",
+        },
+        files=[
+            ("files", ("p1.png", _png_bytes(), "image/png")),
+            ("files", ("p2.png", _png_bytes(), "image/png")),
+        ],
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    deadline = time.time() + 5.0
+    job_data = resp.json()
+    while job_data["status"] not in ("completed", "failed") and time.time() < deadline:
+        time.sleep(0.02)
+        job_data = client.get(f"/api/jobs/{job_id}").json()
+        seen_eta.append(job_data.get("eta_seconds"))
+
+    assert job_data["status"] == "completed"
+    assert job_data["files"] == ["Calculus_Week1.md"]
+    assert job_data["eta_seconds"] == 0.0
+    assert job_data["elapsed_seconds"] >= 0.0
+
+    md_text = (tmp_path / "archive" / "Math" / "Notes" / "Calculus_Week1.md").read_text(encoding="utf-8")
+    assert 'title: "Calculus_Week1"' in md_text
+    assert "ocr_pipeline: true" in md_text
+    assert "  - calculus" in md_text
+    assert "Integral calculus notes" in md_text
 
 
 def test_web_ui_upload_job_completes_and_triggers_callback(tmp_path: Path) -> None:

@@ -27,7 +27,16 @@ export const pullModel = (model) => {
 export const deleteModel = (model) =>
   requestJson(`/api/models/${encodeURIComponent(model)}`, { method: "DELETE" });
 
-export const fetchArtifacts = () => requestJson("/api/artifacts");
+export const fetchArtifacts = ({ q = "", folder = "", tag = "", sort = "newest" } = {}) => {
+  const params = new URLSearchParams({ q, folder, tag, sort });
+  return requestJson(`/api/artifacts?${params.toString()}`);
+};
+export const createArtifactFolder = (folder) =>
+  requestJson("/api/artifacts/folder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folder }),
+  });
 export const fetchArtifactContent = async (path) => {
   const res = await fetch(`/api/artifacts/content?path=${encodeURIComponent(path)}`);
   if (!res.ok) throw new Error("Failed to load artifact");
@@ -35,11 +44,27 @@ export const fetchArtifactContent = async (path) => {
 };
 export const artifactDownloadUrl = (path) =>
   `/api/artifacts/content?path=${encodeURIComponent(path)}&download=true`;
-export const renameArtifact = (path, newName) =>
-  requestJson("/api/artifacts/rename", {
+export const moveOrRenameArtifact = (path, { newName, targetFolder } = {}) =>
+  requestJson("/api/artifacts/move", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, new_name: newName }),
+    body: JSON.stringify({
+      path,
+      ...(newName !== undefined ? { new_name: newName } : {}),
+      ...(targetFolder !== undefined ? { target_folder: targetFolder } : {}),
+    }),
+  });
+export const updateArtifactTags = (path, tags) =>
+  requestJson("/api/artifacts/tags", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, tags }),
+  });
+export const openInObsidian = (path = "") =>
+  requestJson("/api/artifacts/obsidian", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
   });
 export const deleteArtifact = (path) =>
   requestJson(`/api/artifacts?path=${encodeURIComponent(path)}`, { method: "DELETE" });

@@ -16,9 +16,11 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved }) {
     el("setSystemPrompt").value = s.system_prompt;
     el("setMinimizeTray").checked = Boolean(s.minimize_to_tray);
     el("setDesktopNotify").checked = Boolean(s.desktop_notifications);
+    el("setObsidianMode").checked = Boolean(s.obsidian_mode);
     el("wizArchiveDir").value = s.archive_dir;
     el("wizTray").checked = Boolean(s.minimize_to_tray);
     el("wizNotify").checked = Boolean(s.desktop_notifications);
+    el("wizObsidian").checked = Boolean(s.obsidian_mode);
     return s;
   }
 
@@ -31,12 +33,16 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved }) {
     let data = await fetchModels();
     if (!data.online && data.installed && autoLaunch) {
       oDesc.className = "small text-primary";
-      oDesc.textContent = "Detected local Ollama installation. Attempting to start Ollama service...";
+      oDesc.textContent = "Detected local Ollama installation. Starting Ollama service...";
       startBtn.classList.add("d-none");
-      const res = await startOllama();
-      if (res.online) {
-        showToast("Ollama Started", "Local Ollama service launched automatically.", "success");
-        await onSettingsSaved();
+      try {
+        const res = await startOllama();
+        if (res.online) {
+          showToast("Ollama Started", "Local Ollama service launched automatically.", "success");
+          await onSettingsSaved();
+        }
+      } catch {
+        // Ignore transient startup error and re-check below
       }
       data = await fetchModels();
     }
@@ -115,6 +121,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved }) {
       archive_dir: el("wizArchiveDir").value.trim(),
       minimize_to_tray: el("wizTray").checked,
       desktop_notifications: el("wizNotify").checked,
+      obsidian_mode: el("wizObsidian").checked,
     });
     wizardModal.hide();
     await loadSettingsForm();
@@ -140,6 +147,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved }) {
       system_prompt: el("setSystemPrompt").value,
       minimize_to_tray: el("setMinimizeTray").checked,
       desktop_notifications: el("setDesktopNotify").checked,
+      obsidian_mode: el("setObsidianMode").checked,
     });
     el("settingsSaveMsg").textContent = "Saved!";
     setTimeout(() => (el("settingsSaveMsg").textContent = ""), 2500);
