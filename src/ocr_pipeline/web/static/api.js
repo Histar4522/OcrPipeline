@@ -9,6 +9,12 @@ async function requestJson(url, options) {
 }
 
 export const fetchHealth = () => requestJson("/api/health");
+export const openExternalUrl = (url) =>
+  requestJson("/api/open-url", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
 export const fetchSettings = () => requestJson("/api/settings");
 export const saveSettings = (payload) =>
   requestJson("/api/settings", {

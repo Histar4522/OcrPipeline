@@ -1,5 +1,7 @@
 /** Shared Markdown + LaTeX (KaTeX) + Bootstrap table renderer. */
 
+import { openExternalUrl } from "./api.js";
+
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
 function splitFrontmatter(text) {
@@ -25,8 +27,11 @@ function protectMathAndCode(markdown) {
 
   // Protect block & inline LaTeX so marked does not eat underscores, asterisks, or backslashes
   protectedText = protectedText.replace(
-    /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$(?!\s)(?:\\.|[^$\\\n])+(?<!\s)\$/g,
-    (m) => stash(m, true)
+    /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\\begin\{(align\*?|gather\*?|equation\*?|multline\*?)\}[\s\S]+?\\end\{\1\}|\$(?!\s)(?:\\.|[^$\\\n])+(?<!\s)\$/g,
+    (m) => {
+      const normalized = m.startsWith("\\begin{") ? `$$\n${m}\n$$` : m;
+      return stash(normalized, true);
+    }
   );
 
   return { protectedText, placeholders };
@@ -40,7 +45,8 @@ function restoreTokens(html, placeholders) {
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
-      output = output.replaceAll(token.id, escaped);
+      // Use a function replacement so JS does not treat "$$" in LaTeX as a single "$"
+      output = output.replaceAll(token.id, () => escaped);
     } else {
       output = output.replaceAll(token.id, () => token.raw);
     }
@@ -61,6 +67,18 @@ function enhanceRenderedDom(container) {
 
   for (const bq of container.querySelectorAll("blockquote")) {
     bq.classList.add("blockquote-ocr");
+  }
+
+  for (const link of container.querySelectorAll("a[href]")) {
+    const rawHref = link.getAttribute("href") || "";
+    link.setAttribute("target", "_blank");
+    link.setAttribute("rel", "noopener noreferrer");
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (/^(https?:|mailto:)/i.test(rawHref)) {
+        openExternalUrl(rawHref).catch(() => window.open(rawHref, "_blank", "noopener,noreferrer"));
+      }
+    });
   }
 
   if (typeof window.renderMathInElement === "function") {

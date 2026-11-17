@@ -50,6 +50,9 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert icon.status_code == 200
     assert icon.headers["content-type"] == "image/png"
 
+    bad_url = client.post("/api/open-url", json={"url": "file:///C:/Windows/win.ini"})
+    assert bad_url.status_code == 400
+
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["setup_completed"] is False

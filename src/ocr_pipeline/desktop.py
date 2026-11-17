@@ -117,6 +117,7 @@ def launch_desktop_app(port: int | None = None, ollama_url: str | None = None) -
         width=1280,
         height=840,
         min_size=(960, 640),
+        text_select=True,
     )
     window_ref["win"] = window
 

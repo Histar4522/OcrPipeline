@@ -197,6 +197,18 @@ def create_app(
         generate_app_icon_image(64).save(buf, format="PNG")
         return Response(content=buf.getvalue(), media_type="image/png")
 
+    @app.post("/api/open-url")
+    def open_external_url(payload: dict = Body(...)) -> dict:
+        from urllib.parse import urlparse
+        import webbrowser
+
+        raw_url = str(payload.get("url", "")).strip()
+        parsed = urlparse(raw_url)
+        if parsed.scheme.lower() not in ("http", "https", "mailto"):
+            raise HTTPException(status_code=400, detail="Unsupported URL scheme.")
+        webbrowser.open(raw_url)
+        return {"ok": True}
+
     @app.get("/api/health")
     def health() -> dict:
         cfg = get_settings()
