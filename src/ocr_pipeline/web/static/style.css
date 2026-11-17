@@ -118,3 +118,18 @@ textarea {
   border-color: var(--bs-primary) !important;
   background-color: rgba(13, 110, 253, 0.06);
 }
+
+.folder-drop-over {
+  background-color: rgba(13, 110, 253, 0.14) !important;
+  outline: 2px dashed var(--bs-primary);
+}
+
+.folder-row .folder-actions {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.folder-row:hover .folder-actions,
+.folder-row:focus-within .folder-actions {
+  opacity: 1;
+}

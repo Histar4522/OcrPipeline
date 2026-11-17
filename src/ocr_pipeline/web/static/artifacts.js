@@ -2,20 +2,37 @@ import {
   artifactDownloadUrl,
   createArtifactFolder,
   deleteArtifact,
+  deleteArtifactFolder,
   fetchArtifactContent,
   fetchArtifacts,
   moveOrRenameArtifact,
   openInObsidian,
+  renameArtifactFolder,
   revealArtifact,
   updateArtifactTags,
 } from "./api.js";
-import { bsConfirm, bsMoveArtifact, bsPrompt } from "./dialogs.js";
+import { bsConfirm, bsEditTags, bsMoveArtifact, bsPrompt, triggerDownload } from "./dialogs.js";
 import { renderMarkdownContent } from "./markdown.js";
 
 const el = (id) => document.getElementById(id);
 
-export function initArtifactsView({ showToast }) {
-  const artState = { items: [], folders: [], selected: null, rawMode: false, rawText: "", obsidianMode: false };
+export function initArtifactsView({ showToast, onArchiveChanged }) {
+  const artState = {
+    cwd: "",
+    breadcrumbs: [],
+    childFolders: [],
+    items: [],
+    folders: [],
+    knownTags: [],
+    selected: null,
+    rawMode: false,
+    rawText: "",
+    obsidianMode: false,
+  };
+
+  function notifyChanged() {
+    if (onArchiveChanged) onArchiveChanged();
+  }
 
   function renderPreview() {
     renderMarkdownContent(el("artifactPreview"), artState.rawText, artState.rawMode, "Select an artifact to preview.");
@@ -42,6 +59,15 @@ export function initArtifactsView({ showToast }) {
     el("artifactDownloadBtn").classList.toggle("disabled", !enabled);
   }
 
+  function clearSelection() {
+    artState.selected = null;
+    artState.rawText = "";
+    el("artifactSelectedPath").textContent = "Select an artifact";
+    renderSelectedTags([]);
+    setActionsEnabled(false);
+    renderPreview();
+  }
+
   async function selectArtifact(item) {
     artState.selected = item;
     el("artifactSelectedPath").textContent = item.path;
@@ -50,21 +76,10 @@ export function initArtifactsView({ showToast }) {
     setActionsEnabled(true);
     artState.rawText = await fetchArtifactContent(item.path);
     renderPreview();
-    renderList();
+    renderBrowser();
   }
 
-  function populateFilterDropdowns(folders, tags) {
-    const folderSel = el("artifactFolderSelect");
-    const prevFolder = folderSel.value;
-    folderSel.innerHTML = '<option value="">All Folders</option>';
-    for (const f of folders || []) {
-      const opt = document.createElement("option");
-      opt.value = f;
-      opt.textContent = f;
-      folderSel.appendChild(opt);
-    }
-    if (prevFolder && (folders || []).includes(prevFolder)) folderSel.value = prevFolder;
-
+  function populateTagDropdown(tags) {
     const tagSel = el("artifactTagSelect");
     const prevTag = tagSel.value;
     tagSel.innerHTML = '<option value="">All Tags</option>';
@@ -77,27 +92,190 @@ export function initArtifactsView({ showToast }) {
     if (prevTag && (tags || []).some((t) => t.name === prevTag)) tagSel.value = prevTag;
   }
 
-  function renderList() {
-    const list = el("artifactList");
-    if (!artState.items.length) {
-      list.innerHTML = '<div class="list-group-item text-muted small">No matching .md artifacts.</div>';
+  function renderBreadcrumbs(filtering) {
+    const bc = el("artifactBreadcrumb");
+    bc.innerHTML = "";
+    if (filtering) {
+      const li = document.createElement("li");
+      li.className = "breadcrumb-item active";
+      li.textContent = "Search / Tag Results across Archive";
+      bc.appendChild(li);
       return;
     }
+    for (let i = 0; i < artState.breadcrumbs.length; i++) {
+      const crumb = artState.breadcrumbs[i];
+      const isLast = i === artState.breadcrumbs.length - 1;
+      const li = document.createElement("li");
+      li.className = `breadcrumb-item ${isLast ? "active fw-semibold" : ""}`;
+      if (isLast) {
+        li.textContent = crumb.name;
+      } else {
+        const a = document.createElement("a");
+        a.href = "#";
+        a.textContent = crumb.name;
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          artState.cwd = crumb.path;
+          refresh();
+        });
+        li.appendChild(a);
+      }
+      bc.appendChild(li);
+    }
+  }
+
+  function attachDropTarget(row, targetFolder) {
+    row.addEventListener("dragover", (e) => {
+      if (e.dataTransfer?.types?.includes("text/plain")) {
+        e.preventDefault();
+        row.classList.add("folder-drop-over");
+      }
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("folder-drop-over"));
+    row.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      row.classList.remove("folder-drop-over");
+      const srcPath = e.dataTransfer?.getData("text/plain");
+      if (!srcPath) return;
+      try {
+        const res = await moveOrRenameArtifact(srcPath, { targetFolder });
+        showToast("Moved", res.path, "success");
+        if (artState.selected?.path === srcPath) clearSelection();
+        await refresh();
+        notifyChanged();
+      } catch (err) {
+        showToast("Move Failed", err.message, "danger");
+      }
+    });
+  }
+
+  function makeFolderRow(folder) {
+    const row = document.createElement("div");
+    row.className = "list-group-item list-group-item-action d-flex justify-content-between align-items-center folder-row";
+    row.style.cursor = "pointer";
+    row.innerHTML = `
+      <div class="d-flex align-items-center gap-2 text-truncate me-2">
+        <i class="bi bi-folder-fill text-warning"></i>
+        <span class="fw-medium text-truncate folder-name"></span>
+        <span class="badge bg-body-secondary text-body border">${folder.doc_count}</span>
+      </div>
+      <div class="btn-group btn-group-sm folder-actions flex-shrink-0">
+        <button type="button" class="btn btn-xs btn-outline-secondary rename-dir-btn" title="Rename folder">
+          <i class="bi bi-pencil"></i>
+        </button>
+        <button type="button" class="btn btn-xs btn-outline-danger del-dir-btn" title="Delete folder">
+          <i class="bi bi-trash"></i>
+        </button>
+      </div>`;
+    row.querySelector(".folder-name").textContent = folder.name;
+
+    row.addEventListener("click", (e) => {
+      if (e.target.closest("button")) return;
+      artState.cwd = folder.path;
+      refresh();
+    });
+
+    row.querySelector(".rename-dir-btn").addEventListener("click", async () => {
+      const nextName = await bsPrompt({
+        title: "Rename Folder",
+        label: "New folder name",
+        value: folder.name,
+        confirmText: "Rename",
+      });
+      if (!nextName || !nextName.trim() || nextName.trim() === folder.name) return;
+      try {
+        await renameArtifactFolder(folder.path, nextName.trim());
+        showToast("Folder Renamed", nextName.trim(), "success");
+        await refresh();
+        notifyChanged();
+      } catch (err) {
+        showToast("Rename Failed", err.message, "danger");
+      }
+    });
+
+    row.querySelector(".del-dir-btn").addEventListener("click", async () => {
+      const ok = await bsConfirm({
+        title: "Delete Folder",
+        message: `Delete folder "${folder.path}"?`,
+        confirmText: "Delete",
+        variant: "danger",
+      });
+      if (!ok) return;
+      try {
+        await deleteArtifactFolder(folder.path, false);
+        showToast("Folder Deleted", folder.path);
+        await refresh();
+        notifyChanged();
+      } catch (err) {
+        if (err.message.toLowerCase().includes("not empty")) {
+          const force = await bsConfirm({
+            title: "Folder Not Empty",
+            message: `"${folder.path}" contains files or subfolders. Delete it and ALL contents permanently?`,
+            confirmText: "Delete All",
+            variant: "danger",
+          });
+          if (!force) return;
+          await deleteArtifactFolder(folder.path, true);
+          if (artState.selected?.path.startsWith(`${folder.path}/`)) clearSelection();
+          showToast("Folder Deleted", folder.path);
+          await refresh();
+          notifyChanged();
+        } else {
+          showToast("Delete Failed", err.message, "danger");
+        }
+      }
+    });
+
+    attachDropTarget(row, folder.path);
+    return row;
+  }
+
+  function renderBrowser() {
+    const q = el("artifactSearchInput").value.trim();
+    const tag = el("artifactTagSelect").value;
+    const filtering = Boolean(q || tag);
+    el("clearFiltersBtn").classList.toggle("d-none", !filtering);
+    renderBreadcrumbs(filtering);
+
+    const list = el("artifactList");
     list.innerHTML = "";
+
+    if (!filtering && artState.cwd) {
+      const parent = artState.cwd.includes("/") ? artState.cwd.slice(0, artState.cwd.lastIndexOf("/")) : "";
+      const upRow = document.createElement("button");
+      upRow.type = "button";
+      upRow.className = "list-group-item list-group-item-action text-muted small d-flex align-items-center gap-2";
+      upRow.innerHTML = '<i class="bi bi-arrow-90deg-up"></i><span>.. (Up a folder)</span>';
+      upRow.addEventListener("click", () => {
+        artState.cwd = parent;
+        refresh();
+      });
+      attachDropTarget(upRow, parent);
+      list.appendChild(upRow);
+    }
+
+    if (!filtering) {
+      for (const folder of artState.childFolders) {
+        list.appendChild(makeFolderRow(folder));
+      }
+    }
+
     for (const item of artState.items) {
       const btn = document.createElement("button");
       btn.type = "button";
+      btn.draggable = true;
       const active = artState.selected && item.path === artState.selected.path ? "active" : "";
       btn.className = `list-group-item list-group-item-action ${active}`;
       btn.innerHTML = `
         <div class="d-flex justify-content-between align-items-center">
-          <span class="fw-semibold text-truncate me-2"></span>
+          <span class="fw-semibold text-truncate me-2"><i class="bi bi-file-earmark-text me-1"></i><span class="file-title"></span></span>
           <small class="opacity-75 text-nowrap">${Math.max(1, Math.round(item.size_bytes / 1024))} KB</small>
         </div>
         <div class="small opacity-75 text-truncate meta-line"></div>
         <div class="d-flex flex-wrap gap-1 mt-1 tag-row"></div>`;
-      btn.querySelector("span").textContent = item.name;
-      btn.querySelector(".meta-line").textContent = `${item.folder ? `${item.folder} · ` : ""}${item.modified_at}`;
+      btn.querySelector(".file-title").textContent = item.name;
+      const folderHint = filtering && item.folder ? `${item.folder} · ` : "";
+      btn.querySelector(".meta-line").textContent = `${folderHint}${item.modified_at}`;
       const tagRow = btn.querySelector(".tag-row");
       for (const t of (item.tags || []).slice(0, 4)) {
         const badge = document.createElement("span");
@@ -105,47 +283,64 @@ export function initArtifactsView({ showToast }) {
         badge.textContent = `#${t}`;
         tagRow.appendChild(badge);
       }
+      btn.addEventListener("dragstart", (e) => {
+        e.dataTransfer?.setData("text/plain", item.path);
+      });
       btn.addEventListener("click", () => selectArtifact(item));
       list.appendChild(btn);
+    }
+
+    if (!list.children.length) {
+      list.innerHTML = '<div class="list-group-item text-muted small">This folder is empty.</div>';
     }
   }
 
   async function refresh() {
     const data = await fetchArtifacts({
+      cwd: artState.cwd,
       q: el("artifactSearchInput").value.trim(),
-      folder: el("artifactFolderSelect").value,
       tag: el("artifactTagSelect").value,
       sort: el("artifactSortSelect").value,
     });
+    artState.cwd = data.current_folder || "";
+    artState.breadcrumbs = data.breadcrumbs || [{ name: "Archive", path: "" }];
+    artState.childFolders = data.child_folders || [];
     artState.items = data.artifacts || [];
     artState.folders = data.folders || [];
+    artState.knownTags = (data.tags || []).map((t) => t.name);
     artState.obsidianMode = Boolean(data.obsidian_mode);
     el("artifactDirLabel").textContent = data.archive_dir || "";
     el("obsidianBadge").classList.toggle("d-none", !artState.obsidianMode);
     el("artifactObsidianBtn").classList.toggle("d-none", !artState.obsidianMode);
-    populateFilterDropdowns(artState.folders, data.tags);
-    renderList();
+    populateTagDropdown(data.tags);
+    renderBrowser();
   }
 
   el("artifactSearchInput").addEventListener("input", refresh);
-  el("artifactFolderSelect").addEventListener("change", refresh);
   el("artifactTagSelect").addEventListener("change", refresh);
   el("artifactSortSelect").addEventListener("change", refresh);
   el("refreshArtifactsBtn").addEventListener("click", refresh);
   el("openArchiveFolderBtn").addEventListener("click", () => revealArtifact(""));
+  el("clearFiltersBtn").addEventListener("click", () => {
+    el("artifactSearchInput").value = "";
+    el("artifactTagSelect").value = "";
+    refresh();
+  });
 
   el("newFolderBtn").addEventListener("click", async () => {
     const name = await bsPrompt({
-      title: "New Archive Folder",
-      label: "Folder path inside archive",
-      placeholder: "e.g. Notes/Physics",
+      title: "New Folder",
+      label: artState.cwd ? `Create subfolder inside "${artState.cwd}"` : "Folder name inside archive",
+      placeholder: "e.g. Chemistry",
       confirmText: "Create",
     });
     if (!name || !name.trim()) return;
+    const target = artState.cwd ? `${artState.cwd}/${name.trim()}` : name.trim();
     try {
-      const res = await createArtifactFolder(name.trim());
+      const res = await createArtifactFolder(target);
       showToast("Folder Created", res.folder, "success");
       await refresh();
+      notifyChanged();
     } catch (err) {
       showToast("Folder Error", err.message, "danger");
     }
@@ -157,6 +352,11 @@ export function initArtifactsView({ showToast }) {
   el("artifactObsidianBtn").addEventListener("click", async () => {
     if (!artState.selected) return;
     await openInObsidian(artState.selected.path);
+  });
+  el("artifactDownloadBtn").addEventListener("click", (e) => {
+    if (!artState.selected) return;
+    e.preventDefault();
+    triggerDownload(artifactDownloadUrl(artState.selected.path), artState.selected.name, showToast);
   });
   el("artifactRawBtn").addEventListener("click", () => {
     artState.rawMode = !artState.rawMode;
@@ -172,21 +372,18 @@ export function initArtifactsView({ showToast }) {
 
   el("artifactTagsBtn").addEventListener("click", async () => {
     if (!artState.selected) return;
-    const current = (artState.selected.tags || []).join(", ");
-    const next = await bsPrompt({
-      title: "Edit Artifact Tags",
-      label: "Comma-separated tags (leave empty to clear)",
-      value: current,
-      placeholder: "handwritten, physics, lecture",
-      confirmText: "Update Tags",
-      required: false,
+    const nextTags = await bsEditTags({
+      path: artState.selected.path,
+      initialTags: artState.selected.tags || [],
+      suggestions: artState.knownTags,
     });
-    if (next === null) return;
+    if (nextTags === null) return;
     try {
-      const res = await updateArtifactTags(artState.selected.path, next.split(","));
+      const res = await updateArtifactTags(artState.selected.path, nextTags);
       artState.selected.tags = res.tags;
       await selectArtifact(artState.selected);
       await refresh();
+      notifyChanged();
       showToast("Tags Updated", res.tags.length ? res.tags.map((t) => `#${t}`).join(" ") : "Cleared tags.");
     } catch (err) {
       showToast("Tag Error", err.message, "danger");
@@ -224,7 +421,9 @@ export function initArtifactsView({ showToast }) {
     try {
       const res = await moveOrRenameArtifact(artState.selected.path, { targetFolder });
       showToast("Moved", res.path, "success");
+      artState.cwd = targetFolder;
       await refresh();
+      notifyChanged();
       const updated = artState.items.find((i) => i.path === res.path);
       if (updated) await selectArtifact(updated);
     } catch (err) {
@@ -243,13 +442,9 @@ export function initArtifactsView({ showToast }) {
     if (!confirmed) return;
     try {
       await deleteArtifact(artState.selected.path);
-      artState.selected = null;
-      artState.rawText = "";
-      el("artifactSelectedPath").textContent = "Select an artifact";
-      renderSelectedTags([]);
-      setActionsEnabled(false);
-      renderPreview();
+      clearSelection();
       await refresh();
+      notifyChanged();
       showToast("Deleted", "Artifact removed.");
     } catch (err) {
       showToast("Delete Failed", err.message, "danger");

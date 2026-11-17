@@ -1,5 +1,8 @@
 import {
   cancelJob,
+  createArtifactFolder,
+  fetchArtifacts,
+  fetchFolders,
   fetchHealth,
   fetchJob,
   fetchJobFile,
@@ -14,9 +17,11 @@ import {
   startOllama,
 } from "./api.js";
 import { initArtifactsView } from "./artifacts.js";
+import { bsPrompt, triggerDownload } from "./dialogs.js";
 import { renderMarkdownContent } from "./markdown.js";
 import { initModelsView } from "./models.js";
 import { initSettingsAndWizard } from "./settings_wizard.js";
+import { createTagInput } from "./tag_input.js";
 
 const state = {
   selectedFiles: [],
@@ -289,6 +294,7 @@ async function refreshActiveJob() {
   if (["completed", "failed", "cancelled"].includes(job.status)) {
     clearInterval(state.pollTimer);
     state.pollTimer = null;
+    fetchArtifacts().then((d) => jobTagEditor.setSuggestions((d.tags || []).map((t) => t.name))).catch(() => {});
   }
 }
 
@@ -302,7 +308,27 @@ function selectJob(jobId) {
   state.pollTimer = setInterval(refreshActiveJob, 1500);
 }
 
-const artifactsView = initArtifactsView({ showToast });
+async function syncJobArchiveOptions(selectFolder = null) {
+  try {
+    const [folderData, artData] = await Promise.all([fetchFolders(), fetchArtifacts()]);
+    const sel = el("jobFolderSelect");
+    const prev = selectFolder !== null ? selectFolder : sel.value;
+    sel.innerHTML = '<option value="">(Archive Root)</option>';
+    for (const f of folderData.folders || []) {
+      const opt = document.createElement("option");
+      opt.value = f;
+      opt.textContent = f;
+      sel.appendChild(opt);
+    }
+    if (prev && (folderData.folders || []).includes(prev)) sel.value = prev;
+    jobTagEditor.setSuggestions((artData.tags || []).map((t) => t.name));
+  } catch {
+    // Ignore transient fetch failures
+  }
+}
+
+const artifactsView = initArtifactsView({ showToast, onArchiveChanged: () => syncJobArchiveOptions() });
+const jobTagEditor = createTagInput(el("jobTagsContainer"), { placeholder: "Add tag and press Enter..." });
 const modelsView = initModelsView({ showToast, onModelsChanged: syncSettingsToJobForm });
 const settingsWizard = initSettingsAndWizard({
   showToast,
@@ -316,6 +342,7 @@ function switchView(target) {
   });
   document.querySelectorAll(".app-view").forEach((v) => v.classList.add("d-none"));
   el(target).classList.remove("d-none");
+  if (target === "jobsView") syncJobArchiveOptions();
   if (target === "artifactsView") artifactsView.refresh();
   if (target === "modelsView") modelsView.refresh();
   if (target === "settingsView") settingsWizard.loadSettingsForm();
@@ -395,6 +422,38 @@ el("copyMdBtn").addEventListener("click", async () => {
     showToast("Copied", "Markdown copied to clipboard.");
   }
 });
+el("downloadFileBtn").addEventListener("click", (e) => {
+  if (!state.activeJobId || !state.activeFile) return;
+  e.preventDefault();
+  const fname = state.activeFile.split("/").pop() || "output.md";
+  triggerDownload(fileDownloadUrl(state.activeJobId, state.activeFile), fname, showToast);
+});
+el("downloadAllBtn").addEventListener("click", (e) => {
+  if (!state.activeJobId) return;
+  e.preventDefault();
+  triggerDownload(
+    `/api/jobs/${encodeURIComponent(state.activeJobId)}/download-all`,
+    `ocr_${state.activeJobId}.zip`,
+    showToast
+  );
+});
+
+el("jobNewFolderBtn").addEventListener("click", async () => {
+  const name = await bsPrompt({
+    title: "New Archive Folder",
+    label: "Folder path inside archive",
+    placeholder: "e.g. Notes/Math",
+    confirmText: "Create",
+  });
+  if (!name || !name.trim()) return;
+  try {
+    const res = await createArtifactFolder(name.trim());
+    await syncJobArchiveOptions(res.folder);
+    showToast("Folder Created", res.folder, "success");
+  } catch (err) {
+    showToast("Folder Error", err.message, "danger");
+  }
+});
 
 el("jobForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -405,8 +464,8 @@ el("jobForm").addEventListener("submit", async (e) => {
   fd.append("local_input_path", el("localInputPath").value);
   fd.append("local_output_path", el("localOutputPath").value);
   fd.append("job_name", el("jobNameInput").value);
-  fd.append("folder", el("jobFolderInput").value);
-  fd.append("tags", el("jobTagsInput").value);
+  fd.append("folder", el("jobFolderSelect").value);
+  fd.append("tags", jobTagEditor.getTags().join(","));
   fd.append("model", el("modelSelect").value);
   fd.append("dpi", el("dpiInput").value);
   fd.append("max_dim", el("maxDimInput").value);
@@ -446,6 +505,7 @@ document.querySelectorAll("#themeMenu [data-theme]").forEach((btn) => {
   el("footerLicense").textContent = `${health.license} · ${health.copyright}`;
 
   await syncSettingsToJobForm();
+  await syncJobArchiveOptions();
   renderJobHistory(await fetchJobs());
   if (!health.setup_completed) await settingsWizard.openWizard();
 })();

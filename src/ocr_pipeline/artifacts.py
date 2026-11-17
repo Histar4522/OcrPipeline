@@ -4,8 +4,9 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
+import shutil
 
-_INLINE_TAG_RE = re.compile(r"(?<!\S)#([A-Za-z0-9][A-Za-z0-9_/-]{0,48})")
+_INLINE_TAG_RE = re.compile(r"(?<!\S)#([A-Za-z][A-Za-z0-9_/-]{0,48})")
 _FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?(.*)\Z", re.DOTALL)
 
 
@@ -85,20 +86,23 @@ def normalize_tags(raw_tags: str | list[str]) -> list[str]:
 
 
 def extract_tags(text: str) -> list[str]:
-    """Return sorted unique tags from YAML frontmatter and inline #tags."""
+    """Return unique tags from YAML frontmatter, or inline #tags when frontmatter has no tags key."""
     meta, body = parse_frontmatter(text)
-    found: list[str] = []
-    fm_tags = meta.get("tags")
-    if isinstance(fm_tags, list):
-        for t in fm_tags:
-            val = str(t).strip().lstrip("#")
-            if val and val not in found:
-                found.append(val)
-    elif isinstance(fm_tags, str) and fm_tags.strip():
-        for t in normalize_tags(fm_tags):
-            if t not in found:
-                found.append(t)
+    if "tags" in meta:
+        fm_tags = meta.get("tags")
+        found: list[str] = []
+        if isinstance(fm_tags, list):
+            for t in fm_tags:
+                val = str(t).strip().lstrip("#")
+                if val and val not in found:
+                    found.append(val)
+        elif isinstance(fm_tags, str) and fm_tags.strip():
+            for t in normalize_tags(fm_tags):
+                if t not in found:
+                    found.append(t)
+        return found
 
+    found = []
     for match in _INLINE_TAG_RE.finditer(body):
         tag = match.group(1)
         if tag not in found:
@@ -113,6 +117,9 @@ def update_artifact_tags(file_path: Path, tags: list[str]) -> list[str]:
     cleaned = normalize_tags(tags)
     if cleaned:
         meta["tags"] = cleaned
+    elif _INLINE_TAG_RE.search(body):
+        # Keep explicit empty frontmatter list so inline #tags in body don't reappear after clearing
+        meta["tags"] = []
     else:
         meta.pop("tags", None)
     file_path.write_text(format_frontmatter(meta, body), encoding="utf-8")
@@ -136,21 +143,76 @@ def sanitize_rel_folder(folder: str) -> Path:
     return Path(*parts) if parts else Path()
 
 
+def _resolve_folder_path(archive_dir: Path, folder: str) -> tuple[Path, Path]:
+    root = archive_dir.expanduser().resolve()
+    rel = sanitize_rel_folder(folder)
+    if not rel.parts:
+        raise ValueError("Folder path is required.")
+    target = (root / rel).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError("Invalid folder path.")
+    return root, target
+
+
+def rename_folder(archive_dir: Path, folder: str, new_name: str) -> str:
+    """Rename an archive subfolder within its parent directory."""
+    clean_name = new_name.strip()
+    if not clean_name or "/" in clean_name or "\\" in clean_name or clean_name in (".", "..") or clean_name.startswith("."):
+        raise ValueError("Invalid folder name.")
+    root, src = _resolve_folder_path(archive_dir, folder)
+    if not src.is_dir():
+        raise FileNotFoundError(f"Folder not found: {folder}")
+    dst = (src.parent / clean_name).resolve()
+    if dst == src:
+        return src.relative_to(root).as_posix()
+    if dst.exists():
+        raise FileExistsError(f"Folder already exists: {clean_name}")
+    src.rename(dst)
+    return dst.relative_to(root).as_posix()
+
+
+def delete_folder(archive_dir: Path, folder: str, recursive: bool = False) -> None:
+    """Delete an empty subfolder, or recursively delete it when recursive=True."""
+    _root, target = _resolve_folder_path(archive_dir, folder)
+    if not target.is_dir():
+        raise FileNotFoundError(f"Folder not found: {folder}")
+    if recursive:
+        shutil.rmtree(target)
+    else:
+        target.rmdir()
+
+
+def _build_breadcrumbs(current_folder: str) -> list[dict[str, str]]:
+    crumbs = [{"name": "Archive", "path": ""}]
+    if not current_folder:
+        return crumbs
+    acc: list[str] = []
+    for part in current_folder.split("/"):
+        acc.append(part)
+        crumbs.append({"name": part, "path": "/".join(acc)})
+    return crumbs
+
+
 def scan_artifacts(
     archive_dir: Path,
     query: str = "",
     folder: str = "",
     tag: str = "",
     sort: str = "newest",
+    cwd: str | None = None,
 ) -> dict:
-    """Index all Markdown artifacts in archive_dir with folder, tag, and full-text filtering."""
+    """Index Markdown artifacts in archive_dir with Explorer-style folder browsing, tags, and search."""
     root = archive_dir.expanduser().resolve()
     items: list[dict] = []
     folder_set: set[str] = set()
+    folder_doc_counts: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
     q_lower = query.strip().lower()
     folder_filter = folder.strip().strip("/")
     tag_filter = tag.strip().lstrip("#").lower()
+    current_rel = sanitize_rel_folder(cwd or "")
+    current_folder = current_rel.as_posix() if current_rel.parts else ""
+    browse_exact_folder = cwd is not None and not q_lower and not tag_filter
 
     if root.exists():
         for d in root.rglob("*"):
@@ -168,6 +230,11 @@ def scan_artifacts(
                 rel_folder = ""
             else:
                 folder_set.add(rel_folder)
+                acc = []
+                for seg in rel_folder.split("/"):
+                    acc.append(seg)
+                    key = "/".join(acc)
+                    folder_doc_counts[key] = folder_doc_counts.get(key, 0) + 1
 
             raw_text = md_file.read_text(encoding="utf-8", errors="replace")
             meta, body = parse_frontmatter(raw_text)
@@ -175,7 +242,10 @@ def scan_artifacts(
             for t in doc_tags:
                 tag_counts[t] = tag_counts.get(t, 0) + 1
 
-            if folder_filter and rel_folder != folder_filter and not rel_folder.startswith(f"{folder_filter}/"):
+            if browse_exact_folder:
+                if rel_folder != current_folder:
+                    continue
+            elif folder_filter and rel_folder != folder_filter and not rel_folder.startswith(f"{folder_filter}/"):
                 continue
             if tag_filter and tag_filter not in [t.lower() for t in doc_tags]:
                 continue
@@ -208,10 +278,24 @@ def scan_artifacts(
     else:
         items.sort(key=lambda x: x["mtime"], reverse=True)
 
+    child_folders: list[dict] = []
+    prefix = f"{current_folder}/" if current_folder else ""
+    for fpath in sorted(folder_set, key=str.lower):
+        if not fpath.startswith(prefix):
+            continue
+        rest = fpath[len(prefix) :]
+        if rest and "/" not in rest:
+            child_folders.append(
+                {"name": rest, "path": fpath, "doc_count": folder_doc_counts.get(fpath, 0)}
+            )
+
     return {
         "archive_dir": str(root),
         "vault_name": root.name,
-        "folders": sorted(folder_set),
+        "current_folder": current_folder,
+        "breadcrumbs": _build_breadcrumbs(current_folder),
+        "child_folders": child_folders,
+        "folders": sorted(folder_set, key=str.lower),
         "tags": [{"name": k, "count": tag_counts[k]} for k in sorted(tag_counts, key=str.lower)],
         "artifacts": items,
     }

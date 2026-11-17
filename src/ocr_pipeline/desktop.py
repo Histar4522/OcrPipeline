@@ -42,6 +42,41 @@ def _wait_for_server(url: str, timeout: float = 10.0) -> None:
     raise RuntimeError(f"Timed out waiting for local OcrPipeline server at {url}")
 
 
+class DesktopApi:
+    """JavaScript bridge exposed to the pywebview frontend for native OS dialogs."""
+
+    def __init__(self, base_url: str, window_ref: dict[str, webview.Window | None]) -> None:
+        self._base_url = base_url
+        self._window_ref = window_ref
+
+    def save_url(self, rel_url: str, default_filename: str = "output.md") -> dict:
+        """Open a native Save As dialog and write the fetched endpoint bytes to the chosen file."""
+        win = self._window_ref.get("win")
+        if win is None:
+            return {"saved": False, "error": "Window unavailable"}
+
+        ext = Path(default_filename).suffix.lower()
+        file_types = (
+            ("ZIP Archive (*.zip)", "All files (*.*)")
+            if ext == ".zip"
+            else ("Markdown (*.md)", "All files (*.*)")
+        )
+        result = win.create_file_dialog(
+            webview.FileDialog.SAVE,
+            save_filename=default_filename,
+            file_types=file_types,
+        )
+        if not result:
+            return {"saved": False}
+
+        dest = Path(result[0] if isinstance(result, (list, tuple)) else result)
+        target_url = rel_url if rel_url.startswith("http") else f"{self._base_url}{rel_url}"
+        resp = httpx.get(target_url, timeout=60.0)
+        resp.raise_for_status()
+        dest.write_bytes(resp.content)
+        return {"saved": True, "path": str(dest)}
+
+
 def launch_desktop_app(port: int | None = None, ollama_url: str | None = None) -> int:
     """Launch OcrPipeline in a pywebview window with system tray retention and OS toasts."""
     if sys.stdout is None:
@@ -117,9 +152,11 @@ def launch_desktop_app(port: int | None = None, ollama_url: str | None = None) -
     tray_ref["icon"] = tray_icon
     tray_icon.run_detached()
 
+    api = DesktopApi(base_url, window_ref)
     window = webview.create_window(
         "OcrPipeline",
         base_url,
+        js_api=api,
         width=1280,
         height=840,
         min_size=(960, 640),

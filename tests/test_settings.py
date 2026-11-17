@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from ocr_pipeline.desktop import DesktopApi
 from ocr_pipeline.ollama_client import start_ollama_service
 from ocr_pipeline.platform_utils import ensure_app_icon_file, ensure_window_icon_file, generate_app_icon_image
 from ocr_pipeline.settings import AppSettings, load_settings, save_settings
@@ -51,3 +52,25 @@ def test_start_ollama_skips_duplicate_spawn(monkeypatch: object) -> None:
     assert res["online"] is True
     assert res["started"] is False
     assert spawned == []
+
+
+def test_desktop_api_save_url_writes_chosen_file(tmp_path: Path, monkeypatch: object) -> None:
+    import ocr_pipeline.desktop as desk
+
+    dest = tmp_path / "exported.md"
+
+    class FakeWin:
+        def create_file_dialog(self, *args: object, **kwargs: object) -> tuple[str, ...]:
+            return (str(dest),)
+
+    class FakeResp:
+        content = b"# Saved Markdown\n"
+
+        def raise_for_status(self) -> None:
+            pass
+
+    monkeypatch.setattr(desk.httpx, "get", lambda url, timeout=60.0: FakeResp())  # type: ignore[attr-defined]
+    api = DesktopApi("http://127.0.0.1:9999", {"win": FakeWin()})  # type: ignore[dict-item]
+    res = api.save_url("/api/artifacts/content?path=a.md&download=true", "a.md")
+    assert res["saved"] is True
+    assert dest.read_bytes() == b"# Saved Markdown\n"

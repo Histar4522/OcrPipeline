@@ -40,8 +40,9 @@ export const fetchModelPullStatus = () => requestJson("/api/models/pull-status")
 export const deleteModel = (model) =>
   requestJson(`/api/models/${encodeURIComponent(model)}`, { method: "DELETE" });
 
-export const fetchArtifacts = ({ q = "", folder = "", tag = "", sort = "newest" } = {}) => {
-  const params = new URLSearchParams({ q, folder, tag, sort });
+export const fetchFolders = () => requestJson("/api/folders");
+export const fetchArtifacts = ({ cwd = "", q = "", tag = "", sort = "newest" } = {}) => {
+  const params = new URLSearchParams({ cwd, q, tag, sort });
   return requestJson(`/api/artifacts?${params.toString()}`);
 };
 export const createArtifactFolder = (folder) =>
@@ -49,6 +50,16 @@ export const createArtifactFolder = (folder) =>
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ folder }),
+  });
+export const renameArtifactFolder = (folder, newName) =>
+  requestJson("/api/artifacts/folder", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folder, new_name: newName }),
+  });
+export const deleteArtifactFolder = (folder, recursive = false) =>
+  requestJson(`/api/artifacts/folder?folder=${encodeURIComponent(folder)}&recursive=${recursive}`, {
+    method: "DELETE",
   });
 export const fetchArtifactContent = async (path) => {
   const res = await fetch(`/api/artifacts/content?path=${encodeURIComponent(path)}`);

@@ -48,7 +48,7 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert sys_info.json()["ram_gb"] > 0
     assert sys_info.json()["cpu_count"] >= 1
 
-    for asset in ("/static/app.js", "/static/markdown.js", "/static/dialogs.js"):
+    for asset in ("/static/app.js", "/static/markdown.js", "/static/dialogs.js", "/static/tag_input.js"):
         js = client.get(asset)
         assert js.status_code == 200
         assert js.headers["content-type"].startswith(("application/javascript", "text/javascript"))
@@ -63,7 +63,7 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["setup_completed"] is False
-    assert health.json()["version"] == "0.1.0"
+    assert health.json()["version"] == "0.2.0"
     assert health.json()["license"] == "MIT OR Apache-2.0"
     assert "Weien Xu" in health.json()["copyright"]
 
@@ -126,12 +126,18 @@ def test_settings_and_artifact_management(tmp_path: Path) -> None:
     assert folder_resp.status_code == 200
     assert folder_resp.json()["folder"] == "Physics/Mechanics"
 
-    (archive_dir / "note1.md").write_text("# Sample Note\nQuantum mechanics #physics", encoding="utf-8")
+    (archive_dir / "note1.md").write_text("# Sample Note\nQuantum mechanics #physics #1 #2", encoding="utf-8")
 
     listed = client.get("/api/artifacts", params={"q": "quantum", "tag": "physics"})
     assert listed.status_code == 200
     assert [a["path"] for a in listed.json()["artifacts"]] == ["note1.md"]
+    assert listed.json()["artifacts"][0]["tags"] == ["physics"]
     assert listed.json()["obsidian_mode"] is True
+
+    cleared = client.patch("/api/artifacts/tags", json={"path": "note1.md", "tags": []})
+    assert cleared.status_code == 200
+    assert cleared.json()["tags"] == []
+    assert client.get("/api/artifacts", params={"q": "quantum"}).json()["artifacts"][0]["tags"] == []
 
     tagged = client.patch("/api/artifacts/tags", json={"path": "note1.md", "tags": ["lecture", "exam"]})
     assert tagged.status_code == 200
@@ -147,12 +153,30 @@ def test_settings_and_artifact_management(tmp_path: Path) -> None:
     filtered = client.get("/api/artifacts", params={"folder": "Physics", "tag": "exam"})
     assert [a["path"] for a in filtered.json()["artifacts"]] == ["Physics/Mechanics/renamed_note.md"]
 
-    content = client.get("/api/artifacts/content", params={"path": "Physics/Mechanics/renamed_note.md"})
+    root_browse = client.get("/api/artifacts", params={"cwd": ""})
+    assert root_browse.json()["artifacts"] == []
+    assert root_browse.json()["child_folders"] == [{"name": "Physics", "path": "Physics", "doc_count": 1}]
+
+    sub_browse = client.get("/api/artifacts", params={"cwd": "Physics/Mechanics"})
+    assert [b["name"] for b in sub_browse.json()["breadcrumbs"]] == ["Archive", "Physics", "Mechanics"]
+    assert [a["name"] for a in sub_browse.json()["artifacts"]] == ["renamed_note.md"]
+
+    ren_dir = client.patch("/api/artifacts/folder", json={"folder": "Physics/Mechanics", "new_name": "Optics"})
+    assert ren_dir.status_code == 200
+    assert ren_dir.json()["folder"] == "Physics/Optics"
+    assert "Physics/Optics" in client.get("/api/folders").json()["folders"]
+
+    content = client.get("/api/artifacts/content", params={"path": "Physics/Optics/renamed_note.md"})
     assert content.status_code == 200
     assert "Quantum mechanics" in content.text
 
-    deleted = client.delete("/api/artifacts", params={"path": "Physics/Mechanics/renamed_note.md"})
+    non_empty_del = client.delete("/api/artifacts/folder", params={"folder": "Physics/Optics"})
+    assert non_empty_del.status_code == 409
+
+    deleted = client.delete("/api/artifacts", params={"path": "Physics/Optics/renamed_note.md"})
     assert deleted.status_code == 200
+    empty_del = client.delete("/api/artifacts/folder", params={"folder": "Physics", "recursive": "true"})
+    assert empty_del.status_code == 200
     assert client.get("/api/artifacts").json()["artifacts"] == []
 
 
@@ -200,6 +224,9 @@ def test_job_naming_folder_tags_obsidian_and_eta(tmp_path: Path) -> None:
     assert "ocr_pipeline: true" in md_text
     assert "  - calculus" in md_text
     assert "Integral calculus notes" in md_text
+    # Ensure internal cache and logs stay in work_dir, keeping archive_dir clean
+    assert not (tmp_path / "archive" / "Math" / "Notes" / "ocr_pipeline.log").exists()
+    assert not (tmp_path / "archive" / "Math" / "Notes" / ".ocr_cache").exists()
 
 
 def test_web_ui_upload_job_completes_and_triggers_callback(tmp_path: Path) -> None:

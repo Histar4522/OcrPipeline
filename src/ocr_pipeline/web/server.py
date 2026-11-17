@@ -21,8 +21,10 @@ from rich.console import Console
 from . import __name__ as _pkg  # noqa: F401
 from .. import __version__
 from ..artifacts import (
+    delete_folder,
     ensure_obsidian_vault,
     normalize_tags,
+    rename_folder,
     sanitize_rel_folder,
     scan_artifacts,
     update_artifact_tags,
@@ -101,6 +103,7 @@ class JobState:
     label: str
     input_dir: Path
     output_dir: Path
+    work_dir: Path
     model: str
     dpi: int
     status: str = "queued"
@@ -116,18 +119,17 @@ class JobState:
     eta_seconds: float | None = None
     folder: str = ""
     tags: list[str] = field(default_factory=list)
+    expected_files: list[Path] = field(default_factory=list, repr=False)
     error: str = ""
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     active_client: httpx.Client | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict:
-        files = []
-        if self.output_dir.exists():
-            files = sorted(
-                p.relative_to(self.output_dir).as_posix()
-                for p in self.output_dir.rglob("*.md")
-                if ".ocr_cache" not in p.parts
-            )
+        files = sorted(
+            p.relative_to(self.output_dir).as_posix()
+            for p in self.expected_files
+            if p.is_file()
+        )
         return {
             "job_id": self.job_id,
             "label": self.label,
@@ -168,6 +170,19 @@ def _save_uploads(files: list[UploadFile], dest_dir: Path) -> None:
                 out.write(chunk)
 
 
+def _unique_output_path(path: Path) -> Path:
+    """Avoid overwriting existing archived .md files on new uploads."""
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    idx = 2
+    while True:
+        cand = path.with_name(f"{stem} ({idx}){suffix}")
+        if not cand.exists():
+            return cand
+        idx += 1
+
+
 def _resolve_artifact_path(archive_dir: Path, rel_path: str) -> Path:
     root = archive_dir.expanduser().resolve()
     target = (root / rel_path).resolve()
@@ -184,7 +199,7 @@ def create_app(
     on_job_finished: Callable[[JobState], None] | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI Desktop & Web UI application."""
-    app = FastAPI(title="OcrPipeline", version="0.2.0")
+    app = FastAPI(title="OcrPipeline", version=__version__)
     root = (jobs_root or default_jobs_dir()).resolve()
     root.mkdir(parents=True, exist_ok=True)
     jobs: dict[str, JobState] = {}
@@ -384,15 +399,22 @@ def create_app(
         except OllamaError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    @app.get("/api/folders")
+    def list_folders() -> dict:
+        cfg = get_settings()
+        data = scan_artifacts(Path(cfg.archive_dir))
+        return {"archive_dir": data["archive_dir"], "folders": data["folders"]}
+
     @app.get("/api/artifacts")
     def list_artifacts(
         q: str = Query(""),
         folder: str = Query(""),
         tag: str = Query(""),
         sort: str = Query("newest"),
+        cwd: str | None = Query(None),
     ) -> dict:
         cfg = get_settings()
-        result = scan_artifacts(Path(cfg.archive_dir), query=q, folder=folder, tag=tag, sort=sort)
+        result = scan_artifacts(Path(cfg.archive_dir), query=q, folder=folder, tag=tag, sort=sort, cwd=cwd)
         result["obsidian_mode"] = cfg.obsidian_mode
         return result
 
@@ -408,6 +430,36 @@ def create_app(
             raise HTTPException(status_code=400, detail="Invalid folder path.")
         target.mkdir(parents=True, exist_ok=True)
         return {"ok": True, "folder": target.relative_to(root_dir).as_posix()}
+
+    @app.patch("/api/artifacts/folder")
+    def rename_artifact_folder(payload: dict = Body(...)) -> dict:
+        cfg = get_settings()
+        try:
+            new_rel = rename_folder(
+                Path(cfg.archive_dir),
+                str(payload.get("folder", "")),
+                str(payload.get("new_name", "")),
+            )
+            return {"ok": True, "folder": new_rel}
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/artifacts/folder")
+    def delete_artifact_folder(folder: str = Query(...), recursive: bool = Query(False)) -> dict:
+        cfg = get_settings()
+        try:
+            delete_folder(Path(cfg.archive_dir), folder, recursive=recursive)
+            return {"ok": True}
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=409, detail="Folder is not empty.") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/artifacts/content")
     def get_artifact_content(path: str = Query(...), download: bool = False) -> FileResponse:
@@ -532,7 +584,7 @@ def create_app(
             if not local_input_path.strip():
                 raise HTTPException(status_code=400, detail="Local input path is required.")
             input_path = Path(local_input_path.strip()).expanduser()
-            default_sub = archive_base / rel_folder if rel_folder.parts else archive_base / f"{input_path.stem or 'batch'}_{job_id[:6]}"
+            default_sub = archive_base / rel_folder if rel_folder.parts else archive_base / f"{input_path.stem or 'batch'}"
             output_dir = Path(local_output_path.strip()).expanduser() if local_output_path.strip() else default_sub
             label = clean_name or input_path.name or str(input_path)
         else:
@@ -540,14 +592,9 @@ def create_app(
             if not valid_files:
                 raise HTTPException(status_code=400, detail="Please select at least one PDF or image.")
             input_path = job_dir / "input"
-            if rel_folder.parts:
-                output_dir = archive_base / rel_folder
-            elif clean_name:
-                output_dir = archive_base
-            else:
-                output_dir = archive_base / f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{job_id[:4]}"
+            output_dir = archive_base / rel_folder if rel_folder.parts else archive_base
             _save_uploads(valid_files, input_path)
-            label = clean_name or f"{len(valid_files)} uploaded file(s)"
+            label = clean_name or (valid_files[0].filename if len(valid_files) == 1 else f"{len(valid_files)} uploaded files")
 
         config = OcrConfig(
             model=model.strip() or settings.default_model,
@@ -579,6 +626,17 @@ def create_app(
                 display_name=clean_name,
             )
 
+        if source_mode == "upload" and not force:
+            tasks = [
+                DocumentTask(
+                    kind=t.kind,
+                    source_paths=t.source_paths,
+                    output_path=_unique_output_path(t.output_path),
+                    display_name=t.display_name,
+                )
+                for t in tasks
+            ]
+
         if ocr_fn is None:
             try:
                 check_ollama_ready(config.ollama_url, config.model)
@@ -590,10 +648,12 @@ def create_app(
             label=label,
             input_dir=input_path,
             output_dir=output_dir.resolve(),
+            work_dir=job_dir.resolve(),
             model=config.model,
             dpi=config.dpi,
             folder=rel_folder.as_posix() if rel_folder.parts else "",
             tags=parsed_tags,
+            expected_files=[t.output_path.resolve() for t in tasks],
             total_docs=len(tasks),
         )
         with lock:
@@ -633,6 +693,7 @@ def create_app(
                     on_progress=on_progress,
                     cancel_event=state.cancel_event,
                     on_client_ready=on_client_ready,
+                    work_dir=state.work_dir,
                 )
                 with lock:
                     state.active_client = None
@@ -687,7 +748,7 @@ def create_app(
             state = jobs.get(job_id)
         if state is None:
             raise HTTPException(status_code=404, detail="Job not found.")
-        log_path = state.output_dir / "ocr_pipeline.log"
+        log_path = state.work_dir / "ocr_pipeline.log"
         if not log_path.exists():
             return PlainTextResponse("Waiting for log output...")
         return PlainTextResponse(log_path.read_text(encoding="utf-8", errors="replace"))
@@ -713,8 +774,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="Job not found.")
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for md_file in sorted(state.output_dir.rglob("*.md")):
-                if ".ocr_cache" not in md_file.parts:
+            for md_file in sorted(state.expected_files):
+                if md_file.is_file():
                     zf.write(md_file, arcname=md_file.relative_to(state.output_dir).as_posix())
         buf.seek(0)
         return StreamingResponse(

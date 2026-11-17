@@ -119,10 +119,11 @@ def run_pipeline(
     on_progress: ProgressCallback | None = None,
     cancel_event: threading.Event | None = None,
     on_client_ready: Callable[[httpx.Client], None] | None = None,
+    work_dir: Path | None = None,
 ) -> RunSummary:
     """Execute OCR over discovered documents with resume, checkpointing, cancellation, and logging."""
-    resolved_output = output_dir.resolve()
-    logger = _setup_logger(resolved_output)
+    resolved_work = (work_dir or output_dir).resolve()
+    logger = _setup_logger(resolved_work)
     ui = console or Console()
     summary = RunSummary(total_docs=len(tasks))
     run_start = time.monotonic()
@@ -201,7 +202,7 @@ def run_pipeline(
 
                 total_pages = _total_pages_for_task(task)
                 page_bar = progress.add_task(f"  [green]{task.display_name}", total=total_pages)
-                cache_dir = _doc_cache_dir(resolved_output, task, config)
+                cache_dir = _doc_cache_dir(resolved_work, task, config)
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 emit(doc=task.display_name, page=0, pages=total_pages)
 
