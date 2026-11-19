@@ -1,11 +1,9 @@
 import {
-  aiBatchOrganizeApply,
-  aiBatchOrganizePlan,
   aiCleanupArtifact,
-  aiSuggestFolder,
   aiSuggestRename,
   aiSuggestTags,
   aiSummarizeArtifact,
+  aiSummarizeFolder,
   artifactDownloadUrl,
   createArtifactFolder,
   deleteArtifact,
@@ -19,7 +17,7 @@ import {
   saveArtifactContent,
   updateArtifactTags,
 } from "./api.js";
-import { bsConfirm, bsEditTags, bsMoveArtifact, bsPrompt, triggerDownload } from "./dialogs.js";
+import { bsConfirm, bsEditTags, bsPrompt, triggerDownload } from "./dialogs.js";
 import { renderMarkdownContent } from "./markdown.js";
 
 const el = (id) => document.getElementById(id);
@@ -31,6 +29,7 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
     childFolders: [],
     items: [],
     folders: [],
+    folderSummary: null,
     knownTags: [],
     selected: null,
     rawMode: false,
@@ -61,7 +60,6 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
   function setActionsEnabled(enabled) {
     el("artifactTagsBtn").disabled = !enabled;
     el("artifactRenameBtn").disabled = !enabled;
-    el("artifactMoveBtn").disabled = !enabled;
     el("artifactAiBtn").disabled = !enabled || !artState.llmAvailable;
     el("artifactRevealBtn").disabled = !enabled;
     el("artifactObsidianBtn").disabled = !enabled;
@@ -71,7 +69,7 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
 
   function setLlmAvailable(available) {
     artState.llmAvailable = Boolean(available);
-    el("aiOrganizeFolderBtn").disabled = !artState.llmAvailable;
+    el("aiFolderSummaryBtn").disabled = !artState.llmAvailable;
     el("artifactAiBtn").disabled = !artState.selected || !artState.llmAvailable;
   }
 
@@ -330,11 +328,23 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
     artState.childFolders = data.child_folders || [];
     artState.items = data.artifacts || [];
     artState.folders = data.folders || [];
+    artState.folderSummary = data.folder_summary || null;
     artState.knownTags = (data.tags || []).map((t) => t.name);
     artState.obsidianMode = Boolean(data.obsidian_mode);
     el("artifactDirLabel").textContent = data.archive_dir || "";
     el("obsidianBadge").classList.toggle("d-none", !artState.obsidianMode);
     el("artifactObsidianBtn").classList.toggle("d-none", !artState.obsidianMode);
+
+    const fBox = el("artifactFolderSummaryBox");
+    if (artState.folderSummary?.summary) {
+      fBox.classList.remove("d-none");
+      const plain = artState.folderSummary.summary.replace(/^#+\s*/gm, "").replace(/\s+/g, " ").trim();
+      el("artifactFolderSummaryText").textContent = plain.slice(0, 180) + (plain.length > 180 ? "…" : "");
+    } else {
+      fBox.classList.add("d-none");
+      el("artifactFolderSummaryText").textContent = "";
+    }
+
     populateTagDropdown(data.tags);
     renderBrowser();
   }
@@ -433,27 +443,6 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
     }
   });
 
-  el("artifactMoveBtn").addEventListener("click", async () => {
-    if (!artState.selected) return;
-    const targetFolder = await bsMoveArtifact({
-      path: artState.selected.path,
-      currentFolder: artState.selected.folder || "",
-      folders: artState.folders,
-    });
-    if (targetFolder === null || targetFolder === (artState.selected.folder || "")) return;
-    try {
-      const res = await moveOrRenameArtifact(artState.selected.path, { targetFolder });
-      showToast("Moved", res.path, "success");
-      artState.cwd = targetFolder;
-      await refresh();
-      notifyChanged();
-      const updated = artState.items.find((i) => i.path === res.path);
-      if (updated) await selectArtifact(updated);
-    } catch (err) {
-      showToast("Move Failed", err.message, "danger");
-    }
-  });
-
   el("artifactDeleteBtn").addEventListener("click", async () => {
     if (!artState.selected) return;
     const confirmed = await bsConfirm({
@@ -511,30 +500,6 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
     }
   });
 
-  el("aiOrganizeBtn").addEventListener("click", async () => {
-    if (!artState.selected) return;
-    showToast("AI Organize", "Finding best archive folder...");
-    try {
-      const suggestion = await aiSuggestFolder(artState.selected.path);
-      const ok = await bsConfirm({
-        title: "AI Suggested Folder",
-        message: `Move "${artState.selected.name}" to "${suggestion.folder || "(Archive Root)"}"?\n${suggestion.reason || ""}`,
-        confirmText: "Move",
-        variant: "primary",
-      });
-      if (!ok) return;
-      const res = await moveOrRenameArtifact(artState.selected.path, { targetFolder: suggestion.folder });
-      showToast("Moved", res.path, "success");
-      artState.cwd = suggestion.folder;
-      await refresh();
-      notifyChanged();
-      const updated = artState.items.find((i) => i.path === res.path);
-      if (updated) await selectArtifact(updated);
-    } catch (err) {
-      showToast("AI Organize Error", err.message, "danger");
-    }
-  });
-
   el("aiSummarizeBtn").addEventListener("click", async () => {
     if (!artState.selected) return;
     showToast("AI Summary", "Summarizing note...");
@@ -579,75 +544,44 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
     }
   });
 
-  let pendingBatchPlan = [];
-  el("aiOrganizeFolderBtn").addEventListener("click", async () => {
-    showToast("AI Organize", "Analyzing folder files...");
+  function showFolderSummaryModal(summaryObj) {
+    const folderLabel = summaryObj.folder || "Archive Root";
+    const updatedPart = summaryObj.updated_at ? ` · updated ${summaryObj.updated_at}` : "";
+    el("aiFolderSummaryMeta").textContent = `${folderLabel} · ${summaryObj.doc_count || 0} document(s)${updatedPart}`;
+    renderMarkdownContent(
+      el("aiFolderSummaryPreview"),
+      summaryObj.summary || "_No Markdown documents found in this folder._",
+      false
+    );
+    window.bootstrap.Modal.getOrCreateInstance(el("aiFolderSummaryModal")).show();
+  }
+
+  async function runFolderSummarize() {
+    showToast("AI Folder Summary", "Summarizing folder contents...");
     try {
-      const res = await aiBatchOrganizePlan(artState.cwd);
-      pendingBatchPlan = res.plan || [];
-      const tbody = el("aiOrganizeBody");
-      tbody.innerHTML = "";
-      if (!pendingBatchPlan.length) {
-        el("aiOrganizeStatus").textContent = "No artifacts found in current folder.";
-      } else {
-        el("aiOrganizeStatus").textContent = `Review ${pendingBatchPlan.length} item(s) before applying:`;
-        pendingBatchPlan.forEach((row, idx) => {
-          const tr = document.createElement("tr");
-          tr.innerHTML = `
-            <td><input type="checkbox" class="form-check-input batch-row-check" data-idx="${idx}" checked /></td>
-            <td class="text-truncate" style="max-width: 170px;"></td>
-            <td><input type="text" class="form-control form-control-sm batch-folder" data-idx="${idx}" /></td>
-            <td><input type="text" class="form-control form-control-sm batch-name" data-idx="${idx}" /></td>
-            <td class="batch-tags text-muted"></td>`;
-          tr.querySelector("td:nth-child(2)").textContent = row.current_name;
-          tr.querySelector(".batch-folder").value = row.suggested_folder || "";
-          tr.querySelector(".batch-name").value = row.suggested_name || row.current_name;
-          tr.querySelector(".batch-tags").textContent = (row.suggested_tags || []).map((t) => `#${t}`).join(" ");
-          tbody.appendChild(tr);
-        });
+      const res = await aiSummarizeFolder(artState.cwd);
+      if (!res.doc_count) {
+        showToast("Empty Folder", "No Markdown documents found in this folder.", "info");
+        return;
       }
-      el("aiOrganizeSelectAll").checked = true;
-      window.bootstrap.Modal.getOrCreateInstance(el("aiOrganizeModal")).show();
-    } catch (err) {
-      showToast("AI Organize Error", err.message, "danger");
-    }
-  });
-
-  el("aiOrganizeSelectAll").addEventListener("change", (e) => {
-    document.querySelectorAll("#aiOrganizeBody .batch-row-check").forEach((cb) => {
-      cb.checked = e.target.checked;
-    });
-  });
-
-  el("aiOrganizeApplyBtn").addEventListener("click", async () => {
-    const items = [];
-    document.querySelectorAll("#aiOrganizeBody .batch-row-check:checked").forEach((cb) => {
-      const idx = Number(cb.dataset.idx);
-      const row = pendingBatchPlan[idx];
-      if (!row) return;
-      const folderInput = document.querySelector(`#aiOrganizeBody .batch-folder[data-idx="${idx}"]`);
-      const nameInput = document.querySelector(`#aiOrganizeBody .batch-name[data-idx="${idx}"]`);
-      items.push({
-        path: row.path,
-        target_folder: folderInput.value.trim(),
-        new_name: nameInput.value.trim() || row.current_name,
-        tags: row.suggested_tags || [],
-        summary: row.summary || "",
-        apply_tags: Boolean(row.suggested_tags?.length),
-        apply_move: true,
-      });
-    });
-    if (!items.length) return;
-    try {
-      const res = await aiBatchOrganizeApply(items);
-      window.bootstrap.Modal.getOrCreateInstance(el("aiOrganizeModal")).hide();
-      clearSelection();
       await refresh();
-      notifyChanged();
-      showToast("Batch Organize Complete", `Updated ${res.applied} artifact(s).`, res.errors?.length ? "warning" : "success");
+      showFolderSummaryModal(res);
+      showToast("Folder Summarized", `Synthesized ${res.doc_count} document(s).`, "success");
     } catch (err) {
-      showToast("Apply Failed", err.message, "danger");
+      showToast("AI Folder Summary Error", err.message, "danger");
     }
+  }
+
+  el("aiFolderSummaryBtn").addEventListener("click", runFolderSummarize);
+  el("aiFolderSummaryRefreshBtn").addEventListener("click", runFolderSummarize);
+  el("viewFolderSummaryBtn").addEventListener("click", () => {
+    if (artState.folderSummary) showFolderSummaryModal(artState.folderSummary);
+  });
+  el("aiFolderSummaryCopyBtn").addEventListener("click", async () => {
+    const text = artState.folderSummary?.summary || "";
+    if (!text) return;
+    await navigator.clipboard.writeText(text);
+    showToast("Copied", "Folder summary copied to clipboard.");
   });
 
   renderPreview();

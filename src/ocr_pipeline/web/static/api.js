@@ -137,12 +137,6 @@ export const aiSuggestRename = (path) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path }),
   });
-export const aiSuggestFolder = (path) =>
-  requestJson("/api/artifacts/ai/organize", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  });
 export const aiSummarizeArtifact = (path) =>
   requestJson("/api/artifacts/ai/summarize", {
     method: "POST",
@@ -155,17 +149,11 @@ export const aiCleanupArtifact = (path) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path }),
   });
-export const aiBatchOrganizePlan = (cwd = "") =>
-  requestJson("/api/artifacts/ai/batch-plan", {
+export const aiSummarizeFolder = (cwd = "") =>
+  requestJson("/api/artifacts/ai/folder-summary", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd }),
-  });
-export const aiBatchOrganizeApply = (items) =>
-  requestJson("/api/artifacts/ai/batch-apply", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items }),
   });
 
 export const fetchJobs = () => requestJson("/api/jobs");

@@ -56,8 +56,6 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
     el("roleAutoTag").disabled = !enabled;
     el("roleAutoSummarize").disabled = !enabled;
     el("roleAutoRename").disabled = !enabled;
-    el("roleAutoOrganize").disabled = !enabled;
-    el("roleAllowNewFolders").disabled = !enabled;
     el("roleLlmAutoCtx").disabled = !enabled;
   }
 
@@ -270,8 +268,6 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
     el("roleAutoTag").checked = Boolean(settings.auto_tag_on_ocr);
     el("roleAutoSummarize").checked = Boolean(settings.auto_summarize_on_ocr);
     el("roleAutoRename").checked = Boolean(settings.auto_rename_on_ocr);
-    el("roleAutoOrganize").checked = Boolean(settings.auto_organize_on_ocr);
-    el("roleAllowNewFolders").checked = Boolean(settings.auto_organize_allow_new_folders);
     el("roleLlmAutoCtx").checked = settings.llm_auto_ctx !== false;
 
     cfgSelect.value = prevCfg && specFor(prevCfg) ? prevCfg : (settings.vision_provider || "ollama");
@@ -315,8 +311,6 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
       auto_tag_on_ocr: el("roleAutoTag").checked,
       auto_summarize_on_ocr: el("roleAutoSummarize").checked,
       auto_rename_on_ocr: el("roleAutoRename").checked,
-      auto_organize_on_ocr: el("roleAutoOrganize").checked,
-      auto_organize_allow_new_folders: el("roleAllowNewFolders").checked,
       llm_auto_ctx: el("roleLlmAutoCtx").checked,
     });
     showToast("Roles Saved", "Updated active Vision & Assistant LLM settings.", "success");

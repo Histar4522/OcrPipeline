@@ -220,7 +220,6 @@ async function syncSettingsToJobForm() {
     ["jobAutoTag", settings.auto_tag_on_ocr],
     ["jobAutoSummarize", settings.auto_summarize_on_ocr],
     ["jobAutoRename", settings.auto_rename_on_ocr],
-    ["jobAutoOrganize", settings.auto_organize_on_ocr],
   ]) {
     el(id).disabled = !llmOn;
     el(id).checked = llmOn && Boolean(val);
@@ -750,7 +749,6 @@ el("jobForm").addEventListener("submit", async (e) => {
     fd.append("auto_tag", String(el("jobAutoTag").checked));
     fd.append("auto_summarize", String(el("jobAutoSummarize").checked));
     fd.append("auto_rename", String(el("jobAutoRename").checked));
-    fd.append("auto_organize", String(el("jobAutoOrganize").checked));
   }
   if (state.sourceMode === "upload") {
     const nativeEntries = [];

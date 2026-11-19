@@ -6,7 +6,7 @@ A cross-platform AI OCR desktop application and CLI for archiving PDFs and image
 
 - **Multi-Provider Vision OCR (Mandatory) + Optional Assistant LLM**:
   - **Vision / OCR Role (Required)**: Use local engines (**Ollama**, **llama.cpp**) or cloud providers (**OpenAI**, **Anthropic**, **Google Gemini**, **Grok**, **Qwen**, **Custom**) for accurate page-to-Markdown OCR.
-  - **Assistant LLM Role (Optional)**: Pair a small local LLM (e.g. `qwen3:1.7b`, `llama3.2:3b`) or cloud model to unlock **Auto-Tagging**, **Auto-Renaming**, **Auto-Organization**, **Auto-Summarization**, **OCR Proofread/Cleanup**, and **Batch AI Organize Folder**. When left unconfigured, core OCR runs normally without AI post-processing.
+  - **Assistant LLM Role (Optional)**: Pair a small local LLM (e.g. `qwen3:1.7b`, `llama3.2:3b`) or cloud model to unlock **Auto-Tagging**, **Auto-Renaming**, **Auto-Summarization**, **AI Folder Content Summary**, and **OCR Proofread/Cleanup** (with sidecar `.md.meta` JSON metadata). When left unconfigured, core OCR runs normally without AI post-processing.
 - **Native Desktop App (`pywebview`)**: Cross-platform window with **Auto / Light / Dark** appearance modes, background **system tray** retention (`pystray`), desktop toast notifications (*Always / Not in focus / Minimized to tray / Never*), and in-app GitHub update checking.
 - **5-Step Post-Install Setup Wizard**: Checks OS/GPU/VRAM hardware, configures your Vision provider (or auto-launches local Ollama), sets optional Assistant LLM, and configures archive preferences.
 - **High-Throughput Pipeline**: Parallel 2-page CPU prefetching/rendering, FIFO job queue with `waiting` classification, page-level `.ocr_cache/` resume, live ETA, and interactive file selection.
@@ -45,8 +45,8 @@ In **Providers & Models** (or the Setup Wizard):
 - **Assistant LLM (Optional)**: Toggle on and select a lightweight local LLM (e.g. `qwen3:1.7b`, `llama3.2:3b`) or cloud LLM (`deepseek-chat`, `gemini-2.5-flash-lite`, etc.), plus post-OCR automation defaults.
 
 ### 3. Run OCR Jobs & Organize Artifacts
-- **Jobs**: Drop or browse PDFs/images (click filenames to open or reveal in folder), choose archive folder/tags, toggle per-job AI post-processing (`Auto-tag`, `Auto-summarize`, `Auto-rename`, `Auto-organize`), and monitor progress/ETA.
-- **Artifacts**: Browse subfolders, filter/search, edit tag chips, or use **AI → Auto-Generate Tags / Suggest Rename / Suggest Folder / Generate Summary / Proofread OCR** and **AI Organize** (batch preview modal).
+- **Jobs**: Drop or browse PDFs/images (click filenames to open or reveal in folder), choose archive folder/tags, toggle per-job AI post-processing (`Auto-tag`, `Auto-summarize`, `Auto-rename`), and monitor progress/ETA.
+- **Artifacts**: Browse subfolders, filter/search, edit tag chips, or use **AI → Auto-Generate Tags / Suggest Rename / Generate Summary / Proofread OCR** and **AI Summarize Folder**.
 - **Settings**: Customize archive paths, OCR quality, notifications, theme, and check GitHub releases under **Settings → Update**.
 
 ### Browser & CLI Modes

@@ -41,11 +41,10 @@ from ..llm_context import calculate_vram_plan
 from ..llm_features import (
     analyze_artifact_all,
     cleanup_ocr_markdown,
-    plan_folder_organization,
     suggest_filename,
-    suggest_folder,
     suggest_tags,
     summarize_document,
+    summarize_folder_contents,
 )
 from ..ollama_client import (
     OllamaError,
@@ -338,15 +337,13 @@ def create_app(
         opts = state.post_llm
         do_tag = bool(opts.get("auto_tag"))
         do_rename = bool(opts.get("auto_rename"))
-        do_organize = bool(opts.get("auto_organize"))
         do_summarize = bool(opts.get("auto_summarize"))
-        if llm_endpoint is None or not (do_tag or do_rename or do_organize or do_summarize):
+        if llm_endpoint is None or not (do_tag or do_rename or do_summarize):
             return
 
         archive_base = (state.archive_root or state.output_dir).resolve()
         index = scan_artifacts(archive_base)
         known_tags = [str(t["name"]) for t in (index.get("tags") or [])]
-        existing_folders = list(index.get("folders") or [])
         multi_doc = len(state.expected_files) != 1
 
         for idx, md_path in enumerate(list(state.expected_files)):
@@ -358,9 +355,7 @@ def create_app(
                     raw_text,
                     current_name=md_path.name,
                     known_tags=known_tags,
-                    existing_folders=existing_folders,
                     endpoint=llm_endpoint,
-                    allow_new_folders=cfg.auto_organize_allow_new_folders,
                 )
                 if do_tag and res["tags"]:
                     merged_tags = normalize_tags(list(state.tags) + list(res["tags"]))
@@ -371,22 +366,13 @@ def create_app(
                 if do_summarize and res["summary"]:
                     update_artifact_summary(md_path, res["summary"])
 
-                dst_dir = md_path.parent
-                if do_organize and not opts.get("explicit_folder") and res["folder"]:
-                    cand_dir = (archive_base / sanitize_rel_folder(res["folder"])).resolve()
-                    if cand_dir.is_relative_to(archive_base):
-                        dst_dir = cand_dir
-                        if res["folder"] not in existing_folders:
-                            existing_folders.append(res["folder"])
-
                 dst_name = md_path.name
                 if do_rename and (multi_doc or not opts.get("explicit_name")) and res["filename"]:
                     dst_name = res["filename"]
 
                 final_path = md_path
-                if dst_dir != md_path.parent or dst_name != md_path.name:
-                    dst_dir.mkdir(parents=True, exist_ok=True)
-                    final_path = _unique_output_path(dst_dir / dst_name)
+                if dst_name != md_path.name:
+                    final_path = _unique_output_path(md_path.parent / dst_name)
                     md_path.rename(final_path)
                     move_artifact_sidecar(md_path, final_path)
                     with lock:
@@ -1006,30 +992,6 @@ def create_app(
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {"ok": True, "suggested_name": suggested}
 
-    @app.post("/api/artifacts/ai/organize")
-    def ai_artifact_organize(payload: dict = Body(...)) -> dict:
-        cfg, endpoint = _require_llm()
-        archive_dir = Path(cfg.archive_dir)
-        rel = str(payload.get("path", "")).strip()
-        target = _resolve_artifact_path(archive_dir, rel)
-        if not target.is_file():
-            raise HTTPException(status_code=404, detail="Artifact not found.")
-        index = scan_artifacts(archive_dir)
-        existing_folders = list(index.get("folders") or [])
-        raw_text = target.read_text(encoding="utf-8", errors="replace")
-        allow_new = bool(payload.get("allow_new_folders", cfg.auto_organize_allow_new_folders))
-        try:
-            res = suggest_folder(
-                raw_text,
-                existing_folders,
-                [],
-                endpoint,  # type: ignore[arg-type]
-                allow_new_folders=allow_new,
-            )
-        except (ProviderError, ValueError) as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return {"ok": True, **res}
-
     @app.post("/api/artifacts/ai/summarize")
     def ai_artifact_summarize(payload: dict = Body(...)) -> dict:
         cfg, endpoint = _require_llm()
@@ -1059,67 +1021,21 @@ def create_app(
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {"ok": True, "original": raw_text, "cleaned_markdown": cleaned}
 
-    @app.post("/api/artifacts/ai/batch-plan")
-    def ai_batch_organize_plan(payload: dict = Body(default={})) -> dict:
+    @app.post("/api/artifacts/ai/folder-summary")
+    def ai_folder_summary(payload: dict = Body(default={})) -> dict:
         cfg, endpoint = _require_llm()
         cwd = sanitize_rel_folder(str(payload.get("cwd", ""))).as_posix()
         if cwd == ".":
             cwd = ""
-        allow_new = bool(payload.get("allow_new_folders", cfg.auto_organize_allow_new_folders))
         try:
-            plan = plan_folder_organization(
+            result = summarize_folder_contents(
                 Path(cfg.archive_dir),
                 cwd,
                 endpoint,  # type: ignore[arg-type]
-                allow_new_folders=allow_new,
             )
         except (ProviderError, ValueError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return {"ok": True, "plan": plan}
-
-    @app.post("/api/artifacts/ai/batch-apply")
-    def ai_batch_organize_apply(payload: dict = Body(...)) -> dict:
-        cfg = get_settings()
-        archive_dir = Path(cfg.archive_dir).expanduser().resolve()
-        items = payload.get("items") or []
-        if not isinstance(items, list):
-            raise HTTPException(status_code=400, detail="items list is required.")
-
-        applied = 0
-        errors: list[str] = []
-        for entry in items:
-            if not isinstance(entry, dict):
-                continue
-            rel = str(entry.get("path", "")).strip()
-            if not rel:
-                continue
-            try:
-                src = _resolve_artifact_path(archive_dir, rel)
-                if not src.is_file():
-                    continue
-                if entry.get("apply_tags") and isinstance(entry.get("tags"), (list, str)):
-                    update_artifact_tags(src, normalize_tags(entry["tags"]))
-                if entry.get("summary"):
-                    update_artifact_summary(src, str(entry["summary"]))
-                if entry.get("apply_move", True):
-                    raw_name = str(entry.get("new_name", "")).strip() or src.name
-                    if "/" in raw_name or "\\" in raw_name or ".." in raw_name:
-                        raise ValueError(f"Invalid filename: {raw_name}")
-                    if not raw_name.lower().endswith(".md"):
-                        raw_name += ".md"
-                    rel_folder = sanitize_rel_folder(str(entry.get("target_folder") or ""))
-                    dst_dir = (archive_dir / rel_folder).resolve()
-                    if not dst_dir.is_relative_to(archive_dir):
-                        raise ValueError("Invalid target folder.")
-                    if dst_dir != src.parent or raw_name != src.name:
-                        dst_dir.mkdir(parents=True, exist_ok=True)
-                        dst = _unique_output_path((dst_dir / raw_name).resolve())
-                        src.rename(dst)
-                        move_artifact_sidecar(src, dst)
-                applied += 1
-            except Exception as exc:
-                errors.append(f"{rel}: {exc}")
-        return {"ok": True, "applied": applied, "errors": errors}
+        return {"ok": True, **result}
 
     @app.get("/api/jobs")
     def list_jobs() -> list[dict]:

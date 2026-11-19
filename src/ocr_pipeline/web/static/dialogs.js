@@ -114,38 +114,6 @@ export function bsPrompt({
   });
 }
 
-export function bsMoveArtifact({ path = "", currentFolder = "", folders = [] } = {}) {
-  const modalEl = el("moveArtifactModal");
-  return runModal(modalEl, (finish) => {
-    el("moveArtifactFileLabel").textContent = path;
-
-    const select = el("moveFolderSelect");
-    const newInput = el("moveNewFolderInput");
-    newInput.value = "";
-    select.innerHTML = '<option value="">(Archive Root)</option>';
-    for (const folder of folders) {
-      const opt = document.createElement("option");
-      opt.value = folder;
-      opt.textContent = folder;
-      select.appendChild(opt);
-    }
-    select.value = folders.includes(currentFolder) ? currentFolder : "";
-
-    const form = el("moveArtifactForm");
-    const onSubmit = (e) => {
-      e.preventDefault();
-      finish(newInput.value.trim() || select.value);
-    };
-    return {
-      defaultValue: null,
-      bind: () => {
-        form.addEventListener("submit", onSubmit);
-        return () => form.removeEventListener("submit", onSubmit);
-      },
-    };
-  });
-}
-
 let _modalTagEditor = null;
 
 export function bsEditTags({ path = "", initialTags = [], suggestions = [] } = {}) {

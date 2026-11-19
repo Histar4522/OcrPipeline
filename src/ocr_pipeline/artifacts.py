@@ -250,7 +250,47 @@ def delete_folder(archive_dir: Path, folder: str, recursive: bool = False) -> No
     if recursive:
         shutil.rmtree(target)
     else:
+        entries = list(target.iterdir())
+        if len(entries) == 1 and entries[0].name == ".folder.meta":
+            entries[0].unlink(missing_ok=True)
         target.rmdir()
+
+
+def _folder_meta_path(archive_dir: Path, folder: str) -> Path:
+    root = archive_dir.expanduser().resolve()
+    rel = sanitize_rel_folder(folder)
+    target_dir = (root / rel).resolve() if rel.parts else root
+    if not target_dir.is_relative_to(root):
+        raise ValueError("Invalid folder path.")
+    return target_dir / ".folder.meta"
+
+
+def read_folder_meta(archive_dir: Path, folder: str = "") -> dict | None:
+    """Read `.folder.meta` JSON summary for `folder` if present, returning None otherwise."""
+    meta_path = _folder_meta_path(archive_dir, folder)
+    if not meta_path.is_file():
+        return None
+    try:
+        loaded = json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
+        if isinstance(loaded, dict) and loaded.get("summary"):
+            return loaded
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def write_folder_meta(archive_dir: Path, folder: str, summary: str, doc_count: int) -> dict:
+    """Persist folder-level AI content summary to `.folder.meta` JSON inside that folder."""
+    meta_path = _folder_meta_path(archive_dir, folder)
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "folder": sanitize_rel_folder(folder).as_posix() if sanitize_rel_folder(folder).parts else "",
+        "doc_count": int(doc_count),
+        "summary": summary.strip(),
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    meta_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return data
 
 
 def _build_breadcrumbs(current_folder: str) -> list[dict[str, str]]:
@@ -371,6 +411,7 @@ def scan_artifacts(
         "archive_dir": str(root),
         "vault_name": root.name,
         "current_folder": current_folder,
+        "folder_summary": read_folder_meta(root, current_folder),
         "breadcrumbs": _build_breadcrumbs(current_folder),
         "child_folders": child_folders,
         "folders": sorted(folder_set, key=str.lower),

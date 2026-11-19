@@ -14,7 +14,15 @@ import re
 
 import httpx
 
-from .artifacts import format_frontmatter, normalize_tags, parse_frontmatter, sanitize_rel_folder, scan_artifacts
+from .artifacts import (
+    format_frontmatter,
+    normalize_tags,
+    parse_frontmatter,
+    sanitize_rel_folder,
+    scan_artifacts,
+    update_artifact_summary,
+    write_folder_meta,
+)
 from .llm_context import (
     choose_adequate_context,
     endpoint_with_ctx,
@@ -28,6 +36,7 @@ logger = logging.getLogger("ocr_pipeline")
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _FENCE_RE = re.compile(r"^```(?:json|markdown|md)?\s*\r?\n(.*?)\r?\n```\s*$", re.DOTALL | re.IGNORECASE)
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+_UUID_OR_HEX_RE = re.compile(r"^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{12,})$", re.IGNORECASE)
 
 
 def _prepare_doc_excerpt(text: str, max_chars: int = 5300) -> str:
@@ -279,6 +288,15 @@ def _prepare_doc_for_llm(
     )
 
 
+def _is_unhelpful_filename(candidate: str, current_name: str) -> bool:
+    stem = Path(candidate).stem.strip().lower()
+    if not stem or stem in ("descriptive_title", "descriptive_name", "document", "untitled", "title"):
+        return True
+    if candidate.strip().lower() == current_name.strip().lower():
+        return True
+    return bool(_UUID_OR_HEX_RE.match(stem))
+
+
 def suggest_tags(
     text: str,
     known_tags: list[str],
@@ -288,17 +306,19 @@ def suggest_tags(
     system_info: dict | None = None,
     client: httpx.Client | None = None,
 ) -> list[str]:
-    """Generate 2-5 concise lowercase tags, preferring reuse of existing archive tags."""
+    """Generate 2-5 concise lowercase tags grounded strictly in this document's content."""
     doc_payload, tuned_ep, _ = _prepare_doc_for_llm(
         text, endpoint, expected_output_tokens=256, system_info=system_info, client=client
     )
-    known_hint = ", ".join(known_tags[:50]) if known_tags else "(none yet)"
     system = (
-        "You categorize archived study/work notes. Output strictly valid JSON matching "
-        '{"tags": ["tag1", "tag2"]}. Tags must be concise lowercase slugs using letters, digits, '
-        "or hyphens (e.g. calculus, organic-chemistry, lecture-notes). Reuse existing archive tags when relevant."
+        "Extract concise lowercase hyphenated topic tags describing what THIS specific document is about. "
+        f'Output strictly valid JSON matching {{"tags": ["topic-one", "topic-two"]}} (2 to {max_tags} tags). '
+        "Base tags strictly on THIS document's subject matter. "
+        "Only reuse an optional archive tag if this document genuinely covers that exact subject."
     )
-    user = f"Existing archive tags: {known_hint}\nMax tags: {max_tags}\n\nDocument:\n{doc_payload}"
+    user = f"Document:\n{doc_payload}"
+    if known_tags:
+        user += f"\n\nOptional existing archive tags (use ONLY if accurately relevant to this document): {', '.join(known_tags[:30])}"
     raw = chat_text(tuned_ep, system, user, json_mode=True, temperature=0.1, max_tokens=256, client=client)
     data = _parse_json_object(raw)
     raw_tags = data.get("tags") or []
@@ -320,58 +340,41 @@ def suggest_filename(
         text, endpoint, expected_output_tokens=160, system_info=system_info, client=client
     )
     system = (
-        "You name archived Markdown documents cleanly. Output strictly valid JSON matching "
-        '{"filename": "Descriptive_Title.md"}. Use short descriptive words separated by underscores or hyphens.'
+        "Generate a short, descriptive Markdown filename (.md) capturing the main topic of the document below. "
+        'Output strictly valid JSON matching {"filename": "Descriptive_Topic_Title.md"}. '
+        "Use 2 to 6 Title_Case words separated by underscores. Never output UUIDs or hex hashes."
     )
-    user = f"Current filename: {current_name}\n\nDocument:\n{doc_payload}"
+    user = f"Document:\n{doc_payload}"
     raw = chat_text(tuned_ep, system, user, json_mode=True, temperature=0.1, max_tokens=160, client=client)
     data = _parse_json_object(raw)
-    return sanitize_suggested_filename(str(data.get("filename") or ""), fallback_name=current_name)
+    cand_raw = str(
+        data.get("filename")
+        or data.get("new_filename")
+        or data.get("suggested_name")
+        or data.get("name")
+        or data.get("title")
+        or ""
+    ).strip()
+    candidate = sanitize_suggested_filename(cand_raw, fallback_name="") if cand_raw else ""
 
+    if _is_unhelpful_filename(candidate, current_name):
+        retry_sys = (
+            "Write a short 2 to 5 word topic title describing the text below. "
+            'Output strictly valid JSON matching {"title": "Short Descriptive Title"}.'
+        )
+        retry_raw = chat_text(
+            tuned_ep, retry_sys, f"Document:\n{doc_payload}", json_mode=True, temperature=0.3, max_tokens=120, client=client
+        )
+        try:
+            retry_data = _parse_json_object(retry_raw)
+            cand2 = str(retry_data.get("title") or retry_data.get("filename") or "").strip()
+        except ValueError:
+            cand2 = _strip_think_and_fences(retry_raw).splitlines()[0].strip()
+        cleaned2 = sanitize_suggested_filename(cand2, fallback_name=current_name) if cand2 else ""
+        if cleaned2 and not _is_unhelpful_filename(cleaned2, current_name):
+            return cleaned2
 
-def suggest_folder(
-    text: str,
-    existing_folders: list[str],
-    tags: list[str],
-    endpoint: ProviderEndpoint,
-    *,
-    allow_new_folders: bool = False,
-    system_info: dict | None = None,
-    client: httpx.Client | None = None,
-) -> dict:
-    """Suggest an archive folder path and short explanation."""
-    doc_payload, tuned_ep, _ = _prepare_doc_for_llm(
-        text, endpoint, expected_output_tokens=220, system_info=system_info, client=client
-    )
-    folder_list = ", ".join(existing_folders) if existing_folders else "(no folders yet — root only)"
-    rule = (
-        "You may choose one of the existing folders, or propose a short new subfolder path (e.g. 'Subject/Topic'), or '' for archive root."
-        if allow_new_folders
-        else "Pick the single best matching folder from existing folders, or '' if none fit well. Do NOT invent new folders."
-    )
-    system = (
-        "You organize Markdown documents into folders. Output strictly valid JSON matching "
-        '{"folder": "Folder/Path", "reason": "short 1-sentence reason"}. '
-        + rule
-    )
-    user = (
-        f"Existing folders: {folder_list}\n"
-        f"Tags: {', '.join(tags) if tags else '(none)'}\n\n"
-        f"Document:\n{doc_payload}"
-    )
-    raw = chat_text(tuned_ep, system, user, json_mode=True, temperature=0.1, max_tokens=220, client=client)
-    data = _parse_json_object(raw)
-    cand = sanitize_rel_folder(str(data.get("folder") or "")).as_posix()
-    if cand == ".":
-        cand = ""
-    if not allow_new_folders and cand and cand not in existing_folders:
-        matched = next((f for f in existing_folders if f.lower() == cand.lower()), "")
-        cand = matched
-    return {
-        "folder": cand,
-        "reason": str(data.get("reason") or "").strip(),
-        "is_new": bool(cand and cand not in existing_folders),
-    }
+    return candidate or (current_name if current_name.lower().endswith(".md") else f"{current_name}.md")
 
 
 def summarize_document(
@@ -405,37 +408,28 @@ def analyze_artifact_all(
     *,
     current_name: str,
     known_tags: list[str],
-    existing_folders: list[str],
+    existing_folders: list[str] | None = None,
     endpoint: ProviderEndpoint,
     allow_new_folders: bool = False,
     max_tags: int = 5,
     system_info: dict | None = None,
     client: httpx.Client | None = None,
 ) -> dict:
-    """Compute tags, filename, folder, and summary via one shared digest (and map-reduce if large)."""
+    """Compute tags, descriptive filename, and summary via one shared digest (and map-reduce if large)."""
     doc_payload, tuned_ep, _ = _prepare_doc_for_llm(
         text, endpoint, expected_output_tokens=512, system_info=system_info, client=client
     )
-    folder_list = ", ".join(existing_folders) if existing_folders else "(no folders yet)"
-    known_hint = ", ".join(known_tags[:50]) if known_tags else "(none yet)"
-    folder_rule = (
-        "Use an existing folder, a short new subfolder path, or '' for root."
-        if allow_new_folders
-        else "Pick from Existing folders only, or '' for root. Do NOT invent new folders."
-    )
     system = (
         "Analyze this archived Markdown document and return strictly valid JSON matching:\n"
-        '{"tags": ["slug1", "slug2"], "filename": "Descriptive_Name.md", '
-        '"folder": "ExistingOrEmpty", "summary": "1-3 concise sentences.", "reason": "folder choice reason"}.\n'
-        f"Tags: 2-{max_tags} concise lowercase slugs reusing Existing tags when relevant. "
-        f"Folder rule: {folder_rule}"
+        '{"tags": ["slug1", "slug2"], "filename": "Descriptive_Topic_Title.md", '
+        '"summary": "1-3 concise sentences."}.\n'
+        f"Tags: 2-{max_tags} concise lowercase hyphenated slugs matching THIS document's topic "
+        "(reuse an optional archive tag ONLY if truly relevant). "
+        "Filename: 2-6 Title_Case words with underscores ending in .md (never a UUID or random string)."
     )
-    user = (
-        f"Current filename: {current_name}\n"
-        f"Existing tags: {known_hint}\n"
-        f"Existing folders: {folder_list}\n\n"
-        f"Document:\n{doc_payload}"
-    )
+    user = f"Document:\n{doc_payload}"
+    if known_tags:
+        user += f"\n\nOptional existing archive tags (reuse ONLY if accurately relevant): {', '.join(known_tags[:30])}"
     raw = chat_text(tuned_ep, system, user, json_mode=True, temperature=0.1, max_tokens=512, client=client)
     data = _parse_json_object(raw)
 
@@ -444,22 +438,13 @@ def analyze_artifact_all(
         raw_tags = [str(t).lower().replace(" ", "-") for t in raw_tags]
     tags = normalize_tags(raw_tags)[:max_tags]
 
-    filename = sanitize_suggested_filename(str(data.get("filename") or ""), fallback_name=current_name)
-
-    cand_folder = sanitize_rel_folder(str(data.get("folder") or "")).as_posix()
-    if cand_folder == ".":
-        cand_folder = ""
-    if not allow_new_folders and cand_folder and cand_folder not in existing_folders:
-        cand_folder = next((f for f in existing_folders if f.lower() == cand_folder.lower()), "")
-
+    raw_fn = str(data.get("filename") or data.get("title") or "").strip()
+    filename = sanitize_suggested_filename(raw_fn, fallback_name=current_name) if raw_fn else current_name
     summary = " ".join(str(data.get("summary") or "").strip().split())
     return {
         "tags": tags,
         "filename": filename,
-        "folder": cand_folder,
-        "is_new_folder": bool(cand_folder and cand_folder not in existing_folders),
         "summary": summary,
-        "reason": str(data.get("reason") or "").strip(),
     }
 
 
@@ -546,53 +531,68 @@ def cleanup_ocr_markdown(
     return cleaned_body + ("\n" if cleaned_body and not cleaned_body.endswith("\n") else "")
 
 
-def plan_folder_organization(
+def summarize_folder_contents(
     archive_dir: Path,
     cwd: str,
     endpoint: ProviderEndpoint,
     *,
-    allow_new_folders: bool = False,
-    limit: int = 30,
+    limit: int = 50,
     system_info: dict | None = None,
     client: httpx.Client | None = None,
-) -> list[dict]:
-    """Generate a dry-run rename/move/tag plan for artifacts inside folder `cwd`."""
-    index = scan_artifacts(archive_dir, cwd=cwd, sort="name")
-    existing_folders: list[str] = list(index.get("folders") or [])
-    known_tags: list[str] = [str(t["name"]) for t in (index.get("tags") or [])]
-    root = archive_dir.expanduser().resolve()
+) -> dict:
+    """Synthesize a Markdown overview of all documents inside folder `cwd` and save `.folder.meta`.
 
-    plan: list[dict] = []
-    for item in (index.get("artifacts") or [])[:limit]:
+    Reuses saved `<file.md>.meta` summaries where available and generates missing ones cleanly.
+    """
+    clean_rel = sanitize_rel_folder(cwd or "")
+    clean_cwd = clean_rel.as_posix() if clean_rel.parts else ""
+    index = scan_artifacts(archive_dir, folder=clean_cwd, sort="name")
+    artifacts = list(index.get("artifacts") or [])
+    if not artifacts:
+        return {"folder": clean_cwd, "doc_count": 0, "summary": "", "updated_at": ""}
+
+    root = archive_dir.expanduser().resolve()
+    entries: list[str] = []
+    for item in artifacts[:limit]:
         rel_path = str(item["path"])
         target = root / rel_path
         if not target.is_file():
             continue
-        text = target.read_text(encoding="utf-8", errors="replace")
-        result = analyze_artifact_all(
-            text,
-            current_name=item["name"],
-            known_tags=known_tags,
-            existing_folders=existing_folders,
-            endpoint=endpoint,
-            allow_new_folders=allow_new_folders,
-            system_info=system_info,
-            client=client,
+        doc_summary = str(item.get("summary") or "").strip()
+        if not doc_summary:
+            raw_text = target.read_text(encoding="utf-8", errors="replace")
+            doc_summary = summarize_document(raw_text, endpoint, system_info=system_info, client=client)
+            if doc_summary:
+                update_artifact_summary(target, doc_summary)
+        tag_str = f" [tags: {', '.join(item['tags'][:5])}]" if item.get("tags") else ""
+        snippet = doc_summary or str(item.get("preview") or "").strip()[:180]
+        entries.append(f"- **{rel_path}**{tag_str}: {snippet}")
+
+    combined = "\n".join(entries)
+    selection = choose_adequate_context(
+        endpoint,
+        combined,
+        expected_output_tokens=750,
+        system_info=system_info,
+    )
+    tuned_ep = endpoint_with_ctx(endpoint, selection.chosen_num_ctx)
+    if selection.needs_splitting:
+        condensed = _reduce_summary_blocks(
+            entries, tuned_ep, max(600, selection.max_single_pass_input_tokens), client=client
         )
-        # Feed newly proposed tags forward within this batch for consistency
-        for t in result["tags"]:
-            if t not in known_tags:
-                known_tags.append(t)
-        plan.append(
-            {
-                "path": rel_path,
-                "current_folder": item["folder"],
-                "current_name": item["name"],
-                "suggested_folder": result["folder"],
-                "suggested_name": result["filename"],
-                "suggested_tags": result["tags"],
-                "summary": result["summary"],
-                "reason": result["reason"],
-            }
-        )
-    return plan
+        combined = "\n\n".join(condensed)
+
+    folder_label = clean_cwd or "Archive Root"
+    system = (
+        "Synthesize the document summaries inside this archive folder into a clean, useful Markdown overview. "
+        "Include concise sections:\n"
+        "### Overview\n(2-4 sentences explaining what this folder contains as a whole)\n"
+        "### Key Topics\n(bullet points of main subjects covered)\n"
+        "### Documents Included\n(brief bullets citing filenames and core takeaways)\n"
+        "Stay strictly factual and grounded in the summaries provided."
+    )
+    user = f"Folder: {folder_label} ({len(entries)} document(s))\n\nDocument summaries:\n{combined}"
+    raw = chat_text(tuned_ep, system, user, json_mode=False, temperature=0.15, max_tokens=800, client=client)
+    summary_md = _strip_think_and_fences(raw).strip()
+    saved = write_folder_meta(archive_dir, clean_cwd, summary_md, doc_count=len(artifacts))
+    return saved

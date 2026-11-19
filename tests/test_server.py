@@ -59,11 +59,13 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
         "jobProviderSelect",
         "jobAiOptionsBox",
         "artifactAiBtn",
-        "aiOrganizeFolderBtn",
+        "aiFolderSummaryBtn",
         "roleVisionProvider",
         "roleLlmEnabled",
     ):
         assert f'id="{elem_id}"' in home.text
+    for removed_id in ("aiOrganizeFolderBtn", "artifactMoveBtn", "aiOrganizeBtn", "aiOrganizeModal"):
+        assert f'id="{removed_id}"' not in home.text
     for val in ("always", "not_in_focus", "minimized", "never"):
         assert f'value="{val}"' in home.text
 
@@ -637,9 +639,9 @@ def test_providers_endpoints_and_ai_artifact_gating(tmp_path: Path, monkeypatch:
     note.write_text("# Linear Algebra\nEigenvalues and eigenvectors", encoding="utf-8")
 
     # Disabled LLM must reject all AI endpoints with 400
-    for ep in ("/api/artifacts/ai/tags", "/api/artifacts/ai/rename", "/api/artifacts/ai/organize", "/api/artifacts/ai/summarize", "/api/artifacts/ai/cleanup"):
+    for ep in ("/api/artifacts/ai/tags", "/api/artifacts/ai/rename", "/api/artifacts/ai/summarize", "/api/artifacts/ai/cleanup"):
         assert client.post(ep, json={"path": "note.md"}).status_code == 400
-    assert client.post("/api/artifacts/ai/batch-plan", json={"cwd": ""}).status_code == 400
+    assert client.post("/api/artifacts/ai/folder-summary", json={"cwd": ""}).status_code == 400
 
     # Enable optional Assistant LLM
     upd = client.put(
@@ -651,24 +653,14 @@ def test_providers_endpoints_and_ai_artifact_gating(tmp_path: Path, monkeypatch:
 
     def fake_chat(endpoint, sys_prompt, user_prompt, **kw):
         if kw.get("json_mode"):
-            if "filename" in sys_prompt and "folder" in sys_prompt:
-                return json.dumps(
-                    {
-                        "tags": ["linear-algebra", "math"],
-                        "filename": "Linear_Algebra_Notes.md",
-                        "folder": "Math",
-                        "summary": "Introduces eigenvalues.",
-                        "reason": "Math note",
-                    }
-                )
             if '"tags"' in sys_prompt:
                 return json.dumps({"tags": ["linear-algebra", "math"]})
-            if '"filename"' in sys_prompt:
+            if '"filename"' in sys_prompt or '"title"' in sys_prompt:
                 return json.dumps({"filename": "Linear_Algebra_Notes.md"})
-            if '"folder"' in sys_prompt:
-                return json.dumps({"folder": "Math", "reason": "Math note"})
             if '"summary"' in sys_prompt:
                 return json.dumps({"summary": "Covers eigenvalues cleanly."})
+        if "Synthesize the document summaries inside this archive folder" in sys_prompt:
+            return "### Overview\nArchive contains Linear Algebra notes."
         return "# Linear Algebra\nClean eigenvalues and eigenvectors."
 
     monkeypatch.setattr(llm_features, "chat_text", fake_chat)  # type: ignore[attr-defined]
@@ -680,10 +672,6 @@ def test_providers_endpoints_and_ai_artifact_gating(tmp_path: Path, monkeypatch:
     ren_res = client.post("/api/artifacts/ai/rename", json={"path": "note.md"})
     assert ren_res.status_code == 200
     assert ren_res.json()["suggested_name"] == "Linear_Algebra_Notes.md"
-
-    org_res = client.post("/api/artifacts/ai/organize", json={"path": "note.md"})
-    assert org_res.status_code == 200
-    assert org_res.json()["folder"] == "Math"
 
     sum_res = client.post("/api/artifacts/ai/summarize", json={"path": "note.md"})
     assert sum_res.status_code == 200
@@ -700,28 +688,17 @@ def test_providers_endpoints_and_ai_artifact_gating(tmp_path: Path, monkeypatch:
     save_res = client.put("/api/artifacts/content", json={"path": "note.md", "content": clean_res.json()["cleaned_markdown"]})
     assert save_res.status_code == 200
 
-    plan_res = client.post("/api/artifacts/ai/batch-plan", json={"cwd": ""})
-    assert plan_res.status_code == 200
-    assert plan_res.json()["plan"][0]["suggested_folder"] == "Math"
+    folder_sum = client.post("/api/artifacts/ai/folder-summary", json={"cwd": ""})
+    assert folder_sum.status_code == 200
+    assert folder_sum.json()["doc_count"] == 1
+    assert "Linear Algebra notes" in folder_sum.json()["summary"]
+    assert (archive_dir / ".folder.meta").is_file()
 
-    apply_res = client.post(
-        "/api/artifacts/ai/batch-apply",
-        json={
-            "items": [
-                {
-                    "path": "note.md",
-                    "target_folder": "Math",
-                    "new_name": "Linear_Algebra_Notes.md",
-                    "tags": ["linear-algebra", "math"],
-                    "apply_tags": True,
-                    "apply_move": True,
-                }
-            ]
-        },
+    moved = client.patch(
+        "/api/artifacts/move",
+        json={"path": "note.md", "new_name": "Linear_Algebra_Notes.md", "target_folder": "Math"},
     )
-    assert apply_res.status_code == 200
-    assert apply_res.json()["applied"] == 1
-    assert (archive_dir / "Math" / "Linear_Algebra_Notes.md").is_file()
+    assert moved.status_code == 200
     moved_meta = archive_dir / "Math" / "Linear_Algebra_Notes.md.meta"
     assert moved_meta.is_file()
     assert not (archive_dir / "note.md.meta").exists()
@@ -752,9 +729,7 @@ def test_post_ocr_llm_automation_and_nonfatal_error(tmp_path: Path, monkeypatch:
         lambda *a, **kw: {
             "tags": ["biology", "atp"],
             "filename": "Cellular_Respiration.md",
-            "folder": "Biology",
             "summary": "Explains ATP synthesis in mitochondria.",
-            "reason": "Biology subject",
         },
     )  # type: ignore[attr-defined]
 
@@ -765,7 +740,6 @@ def test_post_ocr_llm_automation_and_nonfatal_error(tmp_path: Path, monkeypatch:
             "auto_tag": "true",
             "auto_summarize": "true",
             "auto_rename": "true",
-            "auto_organize": "true",
         },
         files=[("files", ("scan.png", _png_bytes(), "image/png"))],
     )
@@ -779,8 +753,8 @@ def test_post_ocr_llm_automation_and_nonfatal_error(tmp_path: Path, monkeypatch:
         job_data = client.get(f"/api/jobs/{job_id}").json()
 
     assert job_data["status"] == "completed"
-    moved_file = archive_dir / "Biology" / "Cellular_Respiration.md"
-    moved_meta = archive_dir / "Biology" / "Cellular_Respiration.md.meta"
+    moved_file = archive_dir / "Cellular_Respiration.md"
+    moved_meta = archive_dir / "Cellular_Respiration.md.meta"
     assert moved_file.is_file()
     assert moved_meta.is_file()
     content = moved_file.read_text(encoding="utf-8")
@@ -791,8 +765,8 @@ def test_post_ocr_llm_automation_and_nonfatal_error(tmp_path: Path, monkeypatch:
     meta_json = json.loads(moved_meta.read_text(encoding="utf-8"))
     assert meta_json["tags"] == ["biology", "atp"]
     assert meta_json["summary"] == "Explains ATP synthesis in mitochondria."
-    assert job_data["files"] == ["Biology/Cellular_Respiration.md"]
-    assert client.get(f"/api/jobs/{job_id}/files/Biology/Cellular_Respiration.md").status_code == 200
+    assert job_data["files"] == ["Cellular_Respiration.md"]
+    assert client.get(f"/api/jobs/{job_id}/files/Cellular_Respiration.md").status_code == 200
     assert client.get(f"/api/jobs/{job_id}/download-all").status_code == 200
 
     # Ensure an LLM exception does not fail the OCR job itself

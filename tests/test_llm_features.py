@@ -11,15 +11,15 @@ from ocr_pipeline.llm_context import (
     inspect_ollama_model_specs,
     split_markdown_chunks,
 )
+from ocr_pipeline.artifacts import scan_artifacts, update_artifact_summary
 from ocr_pipeline.llm_features import (
     _parse_json_object,
     analyze_artifact_all,
     cleanup_ocr_markdown,
-    plan_folder_organization,
     suggest_filename,
-    suggest_folder,
     suggest_tags,
     summarize_document,
+    summarize_folder_contents,
 )
 from ocr_pipeline.providers import ProviderEndpoint
 
@@ -46,16 +46,6 @@ def test_llm_artifact_helpers(tmp_path: Path, monkeypatch: object) -> None:
 
     monkeypatch.setattr(
         "ocr_pipeline.llm_features.chat_text",
-        lambda endpoint, sys, usr, **kw: json.dumps({"folder": "BrandNewFolder", "reason": "Matches waves"}),
-    )  # type: ignore[attr-defined]
-    blocked_new = suggest_folder("# Waves", ["Physics/Optics"], ["waves"], ep, allow_new_folders=False)
-    assert blocked_new["folder"] == ""
-    allowed_new = suggest_folder("# Waves", ["Physics/Optics"], ["waves"], ep, allow_new_folders=True)
-    assert allowed_new["folder"] == "BrandNewFolder"
-    assert allowed_new["is_new"] is True
-
-    monkeypatch.setattr(
-        "ocr_pipeline.llm_features.chat_text",
         lambda endpoint, sys, usr, **kw: json.dumps({"summary": "Introduces Snell's law.\nExplains refraction."}),
     )  # type: ignore[attr-defined]
     assert summarize_document("# Refraction", ep) == "Introduces Snell's law. Explains refraction."
@@ -69,40 +59,71 @@ def test_llm_artifact_helpers(tmp_path: Path, monkeypatch: object) -> None:
     assert "# Clean Title\nFixed paragraph." in cleaned
 
 
-def test_analyze_and_batch_plan(tmp_path: Path, monkeypatch: object) -> None:
+def test_ai_rename_avoids_uuid_echo_and_retries(monkeypatch: object) -> None:
+    ep = ProviderEndpoint("ollama", "http://localhost:11434", "", "qwen3:1.7b")
+    uuid_name = "2f20d00c-e300-4604-8270-a005313f78b5.md"
+    seen_prompts: list[str] = []
+
+    def fake_chat(endpoint: ProviderEndpoint, sys: str, usr: str, **kw: object) -> str:
+        seen_prompts.append(usr)
+        if len(seen_prompts) == 1:
+            return json.dumps({"filename": uuid_name})
+        return json.dumps({"title": "Race and Antiracist Essay"})
+
+    monkeypatch.setattr("ocr_pipeline.llm_features.chat_text", fake_chat)  # type: ignore[attr-defined]
+    suggested = suggest_filename("RACE: A power construct of collected difference.", uuid_name, ep)
+    # Initial prompt never exposes current UUID filename; retry produces clean title
+    assert uuid_name not in seen_prompts[0]
+    assert suggested == "Race_and_Antiracist_Essay.md"
+
+
+def test_analyze_and_folder_content_summary(tmp_path: Path, monkeypatch: object) -> None:
     archive = tmp_path / "archive"
     (archive / "Chemistry").mkdir(parents=True)
-    (archive / "raw_scan.md").write_text("# Acid Base Titration\npH curves and buffers", encoding="utf-8")
+    acid = archive / "Chemistry" / "acid.md"
+    acid.write_text("# Acid Base Titration\npH curves and buffers", encoding="utf-8")
+    update_artifact_summary(acid, "Covers pH titration curves.")
+    bases = archive / "Chemistry" / "bases.md"
+    bases.write_text("# Weak Bases\nKb equilibrium constants", encoding="utf-8")
 
     ep = ProviderEndpoint("ollama", "http://localhost:11434", "", "qwen3:1.7b")
-    monkeypatch.setattr(
-        "ocr_pipeline.llm_features.chat_text",
-        lambda endpoint, sys, usr, **kw: json.dumps(
-            {
-                "tags": ["chemistry", "titration"],
-                "filename": "Acid_Base_Titration.md",
-                "folder": "Chemistry",
-                "summary": "Covers acid-base titration curves.",
-                "reason": "Chemistry lab notes.",
-            }
-        ),
-    )  # type: ignore[attr-defined]
+    calls: list[str] = []
+
+    def fake_chat(endpoint: ProviderEndpoint, sys: str, usr: str, **kw: object) -> str:
+        calls.append(sys)
+        if kw.get("json_mode"):
+            if "filename" in sys:
+                return json.dumps(
+                    {
+                        "tags": ["chemistry", "titration"],
+                        "filename": "Acid_Base_Titration.md",
+                        "summary": "Covers acid-base titration curves.",
+                    }
+                )
+            return json.dumps({"summary": "Explains Kb base equilibrium."})
+        return "### Overview\nFolder covers acid-base equilibria.\n\n### Key Topics\n- Titration\n- Kb"
+
+    monkeypatch.setattr("ocr_pipeline.llm_features.chat_text", fake_chat)  # type: ignore[attr-defined]
 
     single = analyze_artifact_all(
         "# Acid Base Titration",
         current_name="raw_scan.md",
         known_tags=[],
-        existing_folders=["Chemistry"],
         endpoint=ep,
     )
     assert single["filename"] == "Acid_Base_Titration.md"
-    assert single["folder"] == "Chemistry"
     assert single["tags"] == ["chemistry", "titration"]
 
-    plan = plan_folder_organization(archive, "", ep, allow_new_folders=False)
-    assert len(plan) == 1
-    assert plan[0]["suggested_folder"] == "Chemistry"
-    assert plan[0]["suggested_name"] == "Acid_Base_Titration.md"
+    calls.clear()
+    folder_res = summarize_folder_contents(archive, "Chemistry", ep)
+    # Reused acid.md.meta summary, generated summary for bases.md, plus 1 folder synthesis call = 2 calls
+    assert len(calls) == 2
+    assert folder_res["doc_count"] == 2
+    assert "### Overview" in folder_res["summary"]
+    assert (archive / "Chemistry" / "bases.md.meta").is_file()
+    assert (archive / "Chemistry" / ".folder.meta").is_file()
+    scanned = scan_artifacts(archive, cwd="Chemistry")
+    assert scanned["folder_summary"]["doc_count"] == 2
 
 
 def test_vram_calculation_and_context_selection() -> None:

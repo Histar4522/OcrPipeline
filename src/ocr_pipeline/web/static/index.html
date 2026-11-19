@@ -195,10 +195,6 @@
                       <input id="jobAutoRename" class="form-check-input" type="checkbox" disabled />
                       <label class="form-check-label" for="jobAutoRename">Auto-rename</label>
                     </div>
-                    <div class="form-check form-check-inline mb-0 me-0">
-                      <input id="jobAutoOrganize" class="form-check-input" type="checkbox" disabled />
-                      <label class="form-check-label" for="jobAutoOrganize">Auto-organize</label>
-                    </div>
                   </div>
                 </div>
 
@@ -344,12 +340,21 @@
             </nav>
             <div class="d-flex gap-2">
               <button id="clearFiltersBtn" class="btn btn-xs btn-outline-secondary d-none" type="button">Clear Filters</button>
-              <button id="aiOrganizeFolderBtn" class="btn btn-xs btn-outline-primary text-nowrap" type="button" disabled title="Configure an optional Assistant LLM in Providers & Models">
-                <i class="bi bi-stars me-1"></i>AI Organize
+              <button id="aiFolderSummaryBtn" class="btn btn-xs btn-outline-primary text-nowrap" type="button" disabled title="Configure an optional Assistant LLM in Providers & Models">
+                <i class="bi bi-card-text me-1"></i>AI Summarize Folder
               </button>
               <button id="newFolderBtn" class="btn btn-xs btn-outline-primary text-nowrap" type="button">
                 <i class="bi bi-folder-plus me-1"></i>New Folder
               </button>
+            </div>
+          </div>
+          <div id="artifactFolderSummaryBox" class="alert alert-light border small py-2 px-3 mb-3 d-none">
+            <div class="d-flex justify-content-between align-items-center gap-2">
+              <div class="text-truncate">
+                <strong class="me-1"><i class="bi bi-card-text text-primary me-1"></i>Folder Summary:</strong>
+                <span id="artifactFolderSummaryText" class="text-muted"></span>
+              </div>
+              <button id="viewFolderSummaryBtn" class="btn btn-link btn-sm p-0 text-nowrap flex-shrink-0" type="button">View Full</button>
             </div>
           </div>
           <div class="row g-3">
@@ -368,7 +373,6 @@
                   <button id="artifactCopyBtn" class="btn btn-outline-secondary" type="button">Copy</button>
                   <button id="artifactTagsBtn" class="btn btn-outline-secondary" type="button" disabled>Tags</button>
                   <button id="artifactRenameBtn" class="btn btn-outline-secondary" type="button" disabled>Rename</button>
-                  <button id="artifactMoveBtn" class="btn btn-outline-secondary" type="button" disabled>Move</button>
                   <div class="btn-group btn-group-sm" role="group">
                     <button id="artifactAiBtn" class="btn btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" disabled>
                       <i class="bi bi-stars me-1"></i>AI
@@ -376,7 +380,6 @@
                     <ul class="dropdown-menu dropdown-menu-end">
                       <li><button id="aiTagsBtn" class="dropdown-item" type="button"><i class="bi bi-tags me-2"></i>Auto-Generate Tags</button></li>
                       <li><button id="aiRenameBtn" class="dropdown-item" type="button"><i class="bi bi-pencil-square me-2"></i>Suggest Rename</button></li>
-                      <li><button id="aiOrganizeBtn" class="dropdown-item" type="button"><i class="bi bi-folder-symlink me-2"></i>Suggest Folder</button></li>
                       <li><button id="aiSummarizeBtn" class="dropdown-item" type="button"><i class="bi bi-card-text me-2"></i>Generate Summary</button></li>
                       <li><hr class="dropdown-divider" /></li>
                       <li><button id="aiCleanupBtn" class="dropdown-item" type="button"><i class="bi bi-magic me-2"></i>Proofread / Clean Up OCR</button></li>
@@ -455,14 +458,6 @@
                     <div class="form-check mb-0">
                       <input id="roleAutoRename" class="form-check-input" type="checkbox" />
                       <label class="form-check-label" for="roleAutoRename">Auto-rename</label>
-                    </div>
-                    <div class="form-check mb-0">
-                      <input id="roleAutoOrganize" class="form-check-input" type="checkbox" />
-                      <label class="form-check-label" for="roleAutoOrganize">Auto-organize</label>
-                    </div>
-                    <div class="form-check mb-0">
-                      <input id="roleAllowNewFolders" class="form-check-input" type="checkbox" />
-                      <label class="form-check-label" for="roleAllowNewFolders">Allow creating new folders</label>
                     </div>
                   </div>
                   <div class="border-top mt-2 pt-2">
@@ -936,32 +931,6 @@
     </div>
   </div>
 
-  <div class="modal fade" id="moveArtifactModal" tabindex="-1">
-    <div class="modal-dialog modal-dialog-centered">
-      <form class="modal-content" id="moveArtifactForm">
-        <div class="modal-header py-2">
-          <h6 class="modal-title fw-semibold"><i class="bi bi-folder-symlink me-1"></i> Move Artifact</h6>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-        </div>
-        <div class="modal-body">
-          <div class="small text-muted mb-2 text-truncate" id="moveArtifactFileLabel"></div>
-          <div class="mb-2">
-            <label class="form-label small fw-semibold" for="moveFolderSelect">Existing Folder</label>
-            <select class="form-select form-select-sm" id="moveFolderSelect"></select>
-          </div>
-          <div>
-            <label class="form-label small fw-semibold" for="moveNewFolderInput">Or Create / Enter New Folder (optional)</label>
-            <input type="text" class="form-control form-control-sm" id="moveNewFolderInput" placeholder="e.g. Notes/Chemistry" />
-          </div>
-        </div>
-        <div class="modal-footer py-2">
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-sm btn-primary">Move Here</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
   <div class="modal fade" id="editTagsModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
       <form class="modal-content" id="editTagsForm">
@@ -1000,33 +969,21 @@
     </div>
   </div>
 
-  <div class="modal fade" id="aiOrganizeModal" tabindex="-1">
+  <div class="modal fade" id="aiFolderSummaryModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content">
         <div class="modal-header py-2">
-          <h6 class="modal-title fw-semibold"><i class="bi bi-stars me-1"></i> AI Organize Folder Plan</h6>
+          <h6 class="modal-title fw-semibold"><i class="bi bi-card-text me-1"></i> AI Folder Content Summary</h6>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
-          <div class="small text-muted mb-2" id="aiOrganizeStatus">Review suggested folder moves, filenames, and tags before applying:</div>
-          <div class="table-responsive">
-            <table class="table table-sm align-middle small mb-0">
-              <thead>
-                <tr>
-                  <th><input id="aiOrganizeSelectAll" type="checkbox" class="form-check-input" checked /></th>
-                  <th>File</th>
-                  <th>Suggested Folder</th>
-                  <th>Suggested Name</th>
-                  <th>Tags</th>
-                </tr>
-              </thead>
-              <tbody id="aiOrganizeBody"></tbody>
-            </table>
-          </div>
+          <div class="small text-muted mb-2" id="aiFolderSummaryMeta"></div>
+          <div id="aiFolderSummaryPreview" class="markdown-preview border rounded p-3 bg-body"></div>
         </div>
         <div class="modal-footer py-2">
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="button" class="btn btn-sm btn-primary" id="aiOrganizeApplyBtn">Apply Selected</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+          <button type="button" class="btn btn-sm btn-outline-primary" id="aiFolderSummaryRefreshBtn"><i class="bi bi-arrow-clockwise me-1"></i>Regenerate</button>
+          <button type="button" class="btn btn-sm btn-primary" id="aiFolderSummaryCopyBtn"><i class="bi bi-clipboard me-1"></i>Copy Summary</button>
         </div>
       </div>
     </div>
