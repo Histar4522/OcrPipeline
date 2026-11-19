@@ -15,8 +15,35 @@ export function decodeModelChoice(value) {
   };
 }
 
+export function isModelEligibleForRole(providerId, modelName, role) {
+  const pid = String(providerId || "").toLowerCase();
+  const lower = String(modelName || "").trim().toLowerCase();
+  if (!lower) return false;
+  if (
+    ["embed", "rerank", "whisper", "tts-", "dall-e", "gpt-image", "imagen", "veo", "grok-imagine-", "moderation"].some(
+      (tok) => lower.includes(tok)
+    )
+  ) {
+    return false;
+  }
+  if (pid === "deepseek") {
+    if (role === "vision") {
+      return !["deepseek-v4-pro", "deepseek-reasoner", "deepseek-chat"].includes(lower);
+    }
+    if (role === "llm") {
+      return !["deepseek-ocr", "deepseek-ocr-text", "deepseek-ocr-rich", "deepseek-ai/deepseek-ocr"].includes(lower);
+    }
+  }
+  if (pid === "qwen" && role === "llm" && lower.includes("-ocr")) {
+    return false;
+  }
+  return true;
+}
+
 export function getCandidateModelsForCredential(cred, spec, discoveredByCred, role) {
-  const discovered = discoveredByCred?.[cred.id] || [];
+  const discovered = (discoveredByCred?.[cred.id] || []).filter((m) =>
+    isModelEligibleForRole(cred.provider, m, role)
+  );
   const suggested =
     role === "vision" ? spec?.suggested_vision_models || [] : spec?.suggested_llm_models || [];
   // Keep discovered/installed models first, then add suggested defaults without duplicates.

@@ -1,5 +1,6 @@
 """Tests for multi-provider Vision OCR & text LLM adapters."""
 
+import base64
 import json
 from pathlib import Path
 
@@ -100,9 +101,10 @@ def test_vision_ocr_protocols_via_mock_transport() -> None:
     assert seen[1][1]["authorization"] == "Bearer sk-test"
     assert seen[1][2]["messages"][1]["content"][1]["image_url"]["url"] == "data:image/png;base64,QUJD"
     assert seen[2][1]["x-api-key"] == "ak-test"
+    assert "temperature" not in seen[2][2]
     assert seen[2][2]["messages"][0]["content"][0]["source"]["data"] == "QUJD"
-    assert "key=gk-test" in seen[3][0]
-    assert seen[3][2]["contents"][0]["parts"][1]["inline_data"]["data"] == "QUJD"
+    assert seen[3][1]["x-goog-api-key"] == "gk-test"
+    assert seen[3][2]["contents"][0]["parts"][1]["inlineData"]["data"] == "QUJD"
 
 
 def test_chat_text_json_mode_across_protocols() -> None:
@@ -126,7 +128,7 @@ def test_chat_text_json_mode_across_protocols() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         assert chat_text(ProviderEndpoint("ollama", "http://localhost:11434", "", "qwen3:1.7b"), "s", "u", json_mode=True, client=client) == '{"ok": "ollama"}'
-        assert chat_text(ProviderEndpoint("deepseek", "https://api.deepseek.com/v1", "dk", "deepseek-chat"), "s", "u", json_mode=True, client=client) == '{"ok": "compat"}'
+        assert chat_text(ProviderEndpoint("deepseek", "https://api.deepseek.com/v1", "dk", "deepseek-flash"), "s", "u", json_mode=True, client=client) == '{"ok": "compat"}'
         assert chat_text(ProviderEndpoint("anthropic", "https://api.anthropic.com/v1", "ak", "claude-haiku-4-5"), "s", "u", json_mode=True, client=client) == '{"ok": "anthropic"}'
         assert chat_text(ProviderEndpoint("google", "https://generativelanguage.googleapis.com/v1beta", "gk", "gemini-2.5-flash-lite"), "s", "u", json_mode=True, client=client) == '{"ok": "google"}'
 
@@ -174,3 +176,233 @@ def test_connection_checks_and_validation(monkeypatch: object) -> None:
     disabled_res = probe_endpoint_status(ProviderEndpoint("ollama_local", "http://localhost:11434", "", "glm-ocr"), enabled=False)
     assert disabled_res["status"] == "disabled"
     assert disabled_res["status_text"] == "Disabled"
+
+
+def test_deepseek_ocr_tool_and_flash_vision() -> None:
+    calls: list[tuple[str, dict, bytes]] = []
+    png_raw = base64.b64encode(b"\x89PNG\r\n\x1a\nTEST").decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((str(request.url), dict(request.headers), request.content))
+        url_str = str(request.url)
+        if url_str.endswith("/v1/tools/ocr"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "ocr-1",
+                    "object": "ocr.result",
+                    "page_count": 2,
+                    "pages": [
+                        {"index": 1, "text": "Second block", "finish_reason": "stop"},
+                        {"index": 0, "text": "First block", "finish_reason": "stop"},
+                    ],
+                    "usage": {"input_tokens": 120, "output_tokens": 45},
+                },
+            )
+        if url_str.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "flash ok"}}]})
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        # Both https://api.deepseek.com and https://api.deepseek.com/v1 resolve to /v1/tools/ocr
+        metrics: dict[str, object] = {}
+        out1 = vision_ocr_image_b64(
+            png_raw,
+            ProviderEndpoint("deepseek", "https://api.deepseek.com", "dk-1", "deepseek-ocr"),
+            "sys",
+            "usr",
+            client=client,
+            metrics_out=metrics,
+        )
+        assert out1 == "First block\n\nSecond block"
+        assert metrics["prompt_eval_count"] == 120
+        assert metrics["eval_count"] == 45
+
+        out2 = vision_ocr_image_b64(
+            png_raw,
+            ProviderEndpoint("deepseek", "https://api.deepseek.com/v1", "dk-2", "deepseek-ocr-text"),
+            "sys",
+            "usr",
+            client=client,
+        )
+        assert out2 == "First block\n\nSecond block"
+
+        out_flash = vision_ocr_image_b64(
+            png_raw,
+            ProviderEndpoint("deepseek", "https://api.deepseek.com/v1", "dk-3", "deepseek-flash"),
+            "sys",
+            "usr",
+            client=client,
+        )
+        assert out_flash == "flash ok"
+
+    assert calls[0][0] == "https://api.deepseek.com/v1/tools/ocr"
+    assert calls[0][1]["authorization"] == "Bearer dk-1"
+    assert "multipart/form-data" in calls[0][1]["content-type"]
+    assert b"rich_layout_recognition" in calls[0][2]
+    assert b"\x89PNG\r\n\x1a\nTEST" in calls[0][2]
+
+    assert calls[1][0] == "https://api.deepseek.com/v1/tools/ocr"
+    assert b"text_recognition" in calls[1][2]
+
+    assert calls[2][0] == "https://api.deepseek.com/v1/chat/completions"
+    flash_body = json.loads(calls[2][2].decode("utf-8"))
+    assert flash_body["thinking"] == {"type": "disabled"}
+    assert flash_body["messages"][1]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    with pytest.raises(ProviderError, match="does not support Vision"):
+        vision_ocr_image_b64(
+            png_raw,
+            ProviderEndpoint("deepseek", "https://api.deepseek.com/v1", "dk", "deepseek-v4-pro"),
+            "sys",
+            "usr",
+        )
+    with pytest.raises(ProviderError, match="does not support Vision"):
+        check_endpoint_ready(
+            ProviderEndpoint("deepseek", "https://api.deepseek.com/v1", "dk", "deepseek-v4-pro"),
+            require_vision=True,
+        )
+    with pytest.raises(ProviderError, match="dedicated OCR tool"):
+        chat_text(
+            ProviderEndpoint("deepseek", "https://api.deepseek.com/v1", "dk", "deepseek-ocr"),
+            "sys",
+            "usr",
+        )
+
+
+def test_openai_qwen_google_anthropic_quirks(monkeypatch: object) -> None:
+    seen: list[tuple[str, dict, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        seen.append((str(request.url), dict(request.headers), body))
+        url_str = str(request.url)
+        if "/chat/completions" in url_str:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "compat ok"}}]})
+        if ":generateContent" in url_str:
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {"text": "hidden thought", "thought": True},
+                                    {"text": "visible answer"},
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert (
+            chat_text(
+                ProviderEndpoint("openai", "https://api.openai.com/v1", "sk", "gpt-5-mini"),
+                "sys",
+                "usr",
+                max_tokens=512,
+                client=client,
+            )
+            == "compat ok"
+        )
+        assert (
+            chat_text(
+                ProviderEndpoint("openai", "https://api.openai.com/v1", "sk", "gpt-4.1-mini"),
+                "sys",
+                "usr",
+                max_tokens=512,
+                client=client,
+            )
+            == "compat ok"
+        )
+        assert (
+            vision_ocr_image_b64(
+                "QUJD",
+                ProviderEndpoint("qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qk", "qwen-vl-ocr"),
+                "System rules",
+                "User prompt",
+                client=client,
+            )
+            == "compat ok"
+        )
+        assert (
+            chat_text(
+                ProviderEndpoint("qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qk", "qwen3.8-flash"),
+                "sys",
+                "usr",
+                client=client,
+            )
+            == "compat ok"
+        )
+        gem_out = vision_ocr_image_b64(
+            "QUJD",
+            ProviderEndpoint("google", "https://generativelanguage.googleapis.com/v1beta", "gk", "gemini-3.8-flash"),
+            "sys",
+            "usr",
+            client=client,
+        )
+        assert gem_out == "visible answer"
+
+    # GPT-5 omits temperature and uses max_completion_tokens; GPT-4.1 keeps temperature + max_completion_tokens
+    assert "temperature" not in seen[0][2]
+    assert "max_tokens" not in seen[0][2]
+    assert seen[0][2]["max_completion_tokens"] == 512
+    assert seen[1][2]["temperature"] == 0.1
+    assert seen[1][2]["max_completion_tokens"] == 512
+
+    # Qwen OCR omits role=system message & folds prompt into user content, and omits enable_thinking
+    assert all(m["role"] != "system" for m in seen[2][2]["messages"])
+    assert "System rules" in seen[2][2]["messages"][0]["content"][0]["text"]
+    assert "enable_thinking" not in seen[2][2]
+    # Qwen3 text LLM sets enable_thinking=False
+    assert seen[3][2]["enable_thinking"] is False
+
+    # Model discovery filtering for Google, OpenAI, and xAI
+    monkeypatch.setattr(
+        "ocr_pipeline.providers.httpx.get",
+        lambda url, **k: httpx.Response(
+            200,
+            json={
+                "models": [
+                    {"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/text-embedding-004", "supportedGenerationMethods": ["embedContent"]},
+                    {"name": "models/imagen-3.0-generate-002", "supportedGenerationMethods": ["generateContent"]},
+                ]
+            },
+            request=httpx.Request("GET", str(url)),
+        ),
+    )  # type: ignore[attr-defined]
+    gem_list = probe_provider_connection("google", "", "gk-test")
+    assert gem_list["models"] == ["gemini-3.8-flash"]
+
+    monkeypatch.setattr(
+        "ocr_pipeline.providers.httpx.get",
+        lambda url, **k: httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "gpt-5-mini"},
+                    {"id": "whisper-1"},
+                    {"id": "text-embedding-3-small"},
+                    {"id": "gpt-image-1"},
+                ]
+            },
+            request=httpx.Request("GET", str(url)),
+        ),
+    )  # type: ignore[attr-defined]
+    oa_list = probe_provider_connection("openai", "", "sk-test")
+    assert oa_list["models"] == ["gpt-5-mini"]
+
+    monkeypatch.setattr(
+        "ocr_pipeline.providers.httpx.get",
+        lambda url, **k: httpx.Response(
+            200,
+            json={"data": [{"id": "grok-4.7"}, {"id": "grok-imagine-image-2.0"}]},
+            request=httpx.Request("GET", str(url)),
+        ),
+    )  # type: ignore[attr-defined]
+    xai_list = probe_provider_connection("xai", "", "xk-test")
+    assert xai_list["models"] == ["grok-4.7"]

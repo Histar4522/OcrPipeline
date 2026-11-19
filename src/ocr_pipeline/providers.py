@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import asdict, dataclass
 import os
 import threading
@@ -69,6 +70,12 @@ STATUS_LABELS: dict[str, str] = {
 }
 
 
+DEEPSEEK_OCR_TOOL_MODELS: frozenset[str] = frozenset(
+    {"deepseek-ocr", "deepseek-ocr-rich", "deepseek-ocr-text", "deepseek-ai/deepseek-ocr"}
+)
+DEEPSEEK_TEXT_ONLY_MODELS: frozenset[str] = frozenset({"deepseek-v4-pro", "deepseek-reasoner"})
+
+
 PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         id="ollama_local",
@@ -125,8 +132,8 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
         supports_vision=True,
         supports_llm=True,
         env_var="OPENAI_API_KEY",
-        suggested_vision_models=("gpt-4.1-mini", "gpt-4o-mini", "gpt-4.1", "gpt-4o"),
-        suggested_llm_models=("gpt-4.1-nano", "gpt-4.1-mini", "gpt-4o-mini"),
+        suggested_vision_models=("gpt-5-mini", "gpt-4.1-mini", "gpt-5", "gpt-4.1", "gpt-4o-mini"),
+        suggested_llm_models=("gpt-5-nano", "gpt-5-mini", "gpt-4.1-nano", "gpt-4.1-mini"),
     ),
     ProviderSpec(
         id="anthropic",
@@ -139,8 +146,8 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
         supports_vision=True,
         supports_llm=True,
         env_var="ANTHROPIC_API_KEY",
-        suggested_vision_models=("claude-sonnet-4-5", "claude-haiku-4-5"),
-        suggested_llm_models=("claude-haiku-4-5", "claude-sonnet-4-5"),
+        suggested_vision_models=("claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-4-5"),
+        suggested_llm_models=("claude-haiku-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"),
     ),
     ProviderSpec(
         id="google",
@@ -153,8 +160,8 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
         supports_vision=True,
         supports_llm=True,
         env_var="GEMINI_API_KEY",
-        suggested_vision_models=("gemini-2.5-flash", "gemini-2.5-pro"),
-        suggested_llm_models=("gemini-2.5-flash-lite", "gemini-2.5-flash"),
+        suggested_vision_models=("gemini-3.8-flash", "gemini-4-argon", "gemini-2.5-flash"),
+        suggested_llm_models=("gemini-3.8-flash", "gemini-2.5-flash-lite", "gemini-2.5-flash"),
     ),
     ProviderSpec(
         id="deepseek",
@@ -167,8 +174,8 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
         supports_vision=True,
         supports_llm=True,
         env_var="DEEPSEEK_API_KEY",
-        suggested_vision_models=("deepseek-ocr", "deepseek-flash", "deepseek-ai/DeepSeek-OCR"),
-        suggested_llm_models=("deepseek-chat", "deepseek-reasoner"),
+        suggested_vision_models=("deepseek-ocr", "deepseek-ocr-text", "deepseek-flash"),
+        suggested_llm_models=("deepseek-flash", "deepseek-v4-pro"),
     ),
     ProviderSpec(
         id="xai",
@@ -181,8 +188,8 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
         supports_vision=True,
         supports_llm=True,
         env_var="XAI_API_KEY",
-        suggested_vision_models=("grok-2-vision-1212", "grok-4"),
-        suggested_llm_models=("grok-3-mini", "grok-3-fast"),
+        suggested_vision_models=("grok-4.7", "grok-4.6", "grok-4.20-non-reasoning", "grok-4.20-reasoning"),
+        suggested_llm_models=("grok-4.20-non-reasoning", "grok-4.6", "grok-4.7"),
     ),
     ProviderSpec(
         id="qwen",
@@ -195,8 +202,8 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
         supports_vision=True,
         supports_llm=True,
         env_var="DASHSCOPE_API_KEY",
-        suggested_vision_models=("qwen-vl-plus", "qwen-vl-max", "qwen2.5-vl-7b-instruct"),
-        suggested_llm_models=("qwen-turbo", "qwen-plus", "qwen3-4b"),
+        suggested_vision_models=("qwen-vl-ocr", "qwen3.5-ocr", "qwen3-vl-plus", "qwen-vl-plus"),
+        suggested_llm_models=("qwen3.8-flash", "qwen-flash", "qwen-plus", "qwen-turbo"),
     ),
     ProviderSpec(
         id="custom",
@@ -362,6 +369,40 @@ def _openai_headers(api_key: str) -> dict[str, str]:
     return headers
 
 
+def _filter_discovered_models(provider_id: str, names: list[str]) -> list[str]:
+    """Filter out non-chat/non-vision utility models returned by cloud /models endpoints."""
+    pid = (provider_id or "").strip().lower()
+    cleaned: set[str] = set()
+    openai_skip = (
+        "whisper",
+        "tts-",
+        "dall-e",
+        "gpt-image",
+        "sora",
+        "embedding",
+        "moderation",
+        "babbage",
+        "davinci",
+        "realtime",
+        "audio",
+        "transcribe",
+    )
+    google_skip = ("embedding", "aqa", "imagen", "veo", "tts", "robotics")
+    for raw in names:
+        name = str(raw).strip()
+        if not name:
+            continue
+        low = name.lower()
+        if pid == "openai" and any(tok in low for tok in openai_skip):
+            continue
+        if pid == "xai" and low.startswith("grok-imagine-"):
+            continue
+        if pid == "google" and any(tok in low for tok in google_skip):
+            continue
+        cleaned.add(name)
+    return sorted(cleaned)
+
+
 def _send_openai_compat(
     endpoint: ProviderEndpoint,
     messages: list[dict],
@@ -377,22 +418,75 @@ def _send_openai_compat(
         raise ProviderError("Custom provider base URL is required.")
     url = f"{base}/chat/completions"
     api_key = resolve_api_key(endpoint.provider_id, endpoint.api_key)
+    model_lower = endpoint.model.strip().lower()
     payload: dict = {
         "model": endpoint.model,
         "messages": messages,
-        "temperature": temperature,
     }
+    if not (endpoint.provider_id == "openai" and model_lower.startswith(("gpt-5", "o1", "o3", "o4"))):
+        payload["temperature"] = temperature
     if max_tokens is not None:
-        payload["max_tokens"] = max_tokens
+        if endpoint.provider_id == "openai":
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    if endpoint.provider_id == "qwen" and endpoint.model.lower().startswith("qwen3"):
+    if endpoint.provider_id == "deepseek":
+        payload["thinking"] = {"type": "disabled"}
+    if endpoint.provider_id == "qwen" and model_lower.startswith("qwen3") and "ocr" not in model_lower:
         payload["enable_thinking"] = False
 
     def call(http: httpx.Client) -> str:
         resp = http.post(url, headers=_openai_headers(api_key), json=payload, timeout=endpoint.timeout_seconds)
         resp.raise_for_status()
         return _extract_openai_text(resp.json())
+
+    return _invoke_with_retries(endpoint, call, client, cancel_event)
+
+
+def _send_deepseek_ocr(
+    image_b64: str,
+    endpoint: ProviderEndpoint,
+    *,
+    client: httpx.Client | None = None,
+    cancel_event: threading.Event | None = None,
+    metrics_out: dict[str, object] | None = None,
+) -> str:
+    """Call DeepSeek's dedicated multipart /v1/tools/ocr endpoint for a PNG page."""
+    base = resolve_base_url("deepseek", endpoint.base_url)
+    v1_base = base if base.endswith("/v1") else f"{base}/v1"
+    url = f"{v1_base}/tools/ocr"
+    api_key = resolve_api_key("deepseek", endpoint.api_key)
+    if not api_key:
+        raise ProviderError("DeepSeek API key is required.")
+    headers = {"Authorization": f"Bearer {api_key}"}
+    purpose = (
+        "text_recognition"
+        if endpoint.model.strip().lower() == "deepseek-ocr-text"
+        else "rich_layout_recognition"
+    )
+    png_bytes = base64.b64decode(image_b64)
+
+    def call(http: httpx.Client) -> str:
+        resp = http.post(
+            url,
+            headers=headers,
+            data={"purpose": purpose},
+            files={"file": ("page.png", png_bytes, "image/png")},
+            timeout=endpoint.timeout_seconds,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        pages = sorted(payload.get("pages") or [], key=lambda p: int(p.get("index", 0)))
+        if metrics_out is not None and isinstance(payload.get("usage"), dict):
+            usage = payload["usage"]
+            if "input_tokens" in usage:
+                metrics_out["prompt_eval_count"] = int(usage["input_tokens"] or 0)
+            if "output_tokens" in usage:
+                metrics_out["eval_count"] = int(usage["output_tokens"] or 0)
+        texts = [str(p.get("text", "")).strip() for p in pages if str(p.get("text", "")).strip()]
+        return "\n\n".join(texts).strip()
 
     return _invoke_with_retries(endpoint, call, client, cancel_event)
 
@@ -407,6 +501,7 @@ def _send_anthropic(
     client: httpx.Client | None = None,
     cancel_event: threading.Event | None = None,
 ) -> str:
+    del temperature  # Deprecated / rejected on Claude 4.7+ & 5.5+; rely on API defaults.
     base = resolve_base_url("anthropic", endpoint.base_url)
     api_key = resolve_api_key("anthropic", endpoint.api_key)
     if not api_key:
@@ -420,7 +515,6 @@ def _send_anthropic(
     payload: dict = {
         "model": endpoint.model,
         "max_tokens": max_tokens,
-        "temperature": temperature,
         "messages": [{"role": "user", "content": user_content}],
     }
     if system_prompt:
@@ -453,6 +547,10 @@ def _send_google(
         raise ProviderError("Google Gemini API key is required.")
     model_id = endpoint.model.removeprefix("models/")
     url = f"{base}/models/{model_id}:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key,
+    }
     gen_cfg: dict = {"temperature": temperature}
     if max_tokens is not None:
         gen_cfg["maxOutputTokens"] = max_tokens
@@ -466,13 +564,15 @@ def _send_google(
         payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
     def call(http: httpx.Client) -> str:
-        resp = http.post(url, params={"key": api_key}, json=payload, timeout=endpoint.timeout_seconds)
+        resp = http.post(url, headers=headers, json=payload, timeout=endpoint.timeout_seconds)
         resp.raise_for_status()
         candidates = resp.json().get("candidates") or []
         if not candidates:
             return ""
         out_parts = candidates[0].get("content", {}).get("parts") or []
-        return "\n".join(str(p.get("text", "")) for p in out_parts if isinstance(p, dict)).strip()
+        return "\n".join(
+            str(p.get("text", "")) for p in out_parts if isinstance(p, dict) and not p.get("thought")
+        ).strip()
 
     return _invoke_with_retries(endpoint, call, client, cancel_event)
 
@@ -506,19 +606,49 @@ def vision_ocr_image_b64(
         )
         return ocr_image_b64(image_b64, cfg, client=client, cancel_event=cancel_event, metrics_out=metrics_out)
 
+    if spec.id == "deepseek":
+        model_lower = endpoint.model.strip().lower()
+        if model_lower in DEEPSEEK_OCR_TOOL_MODELS:
+            return _send_deepseek_ocr(
+                image_b64,
+                endpoint,
+                client=client,
+                cancel_event=cancel_event,
+                metrics_out=metrics_out,
+            )
+        if model_lower in DEEPSEEK_TEXT_ONLY_MODELS:
+            raise ProviderError(
+                f"DeepSeek model '{endpoint.model}' does not support Vision inputs. Select 'deepseek-ocr' or 'deepseek-flash' instead."
+            )
+
     if spec.protocol == "openai_compat":
         messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
-                ],
-            }
-        )
+        if spec.id == "qwen" and "ocr" in endpoint.model.strip().lower():
+            # DashScope Qwen-OCR models use a fixed internal system prompt and reject custom system turns.
+            combined = (
+                f"{system_prompt.strip()}\n\n{user_prompt.strip()}" if system_prompt.strip() else user_prompt
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": combined},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                    ],
+                }
+            )
+        else:
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                    ],
+                }
+            )
         return _send_openai_compat(endpoint, messages, temperature=0.0, client=client, cancel_event=cancel_event)
 
     if spec.protocol == "anthropic":
@@ -536,7 +666,7 @@ def vision_ocr_image_b64(
     if spec.protocol == "google":
         parts = [
             {"text": user_prompt},
-            {"inline_data": {"mime_type": "image/png", "data": image_b64}},
+            {"inlineData": {"mimeType": "image/png", "data": image_b64}},
         ]
         return _send_google(endpoint, system_prompt, parts, temperature=0.0, client=client, cancel_event=cancel_event)
 
@@ -585,6 +715,10 @@ def chat_text(
     spec = get_provider_spec(endpoint.provider_id)
     if not endpoint.model.strip():
         raise ProviderError(f"LLM model is required for {spec.label}.")
+    if spec.id == "deepseek" and endpoint.model.strip().lower() in DEEPSEEK_OCR_TOOL_MODELS:
+        raise ProviderError(
+            f"'{endpoint.model}' is a dedicated OCR tool and cannot be used as a text LLM. Select 'deepseek-flash' or 'deepseek-v4-pro' instead."
+        )
 
     if spec.protocol == "ollama":
         base = resolve_base_url(spec.id, endpoint.base_url)
@@ -715,18 +849,29 @@ def test_provider_connection(
         if spec.protocol == "google":
             resp = httpx.get(
                 f"{resolved_url}/models",
-                params={"key": resolved_key, "pageSize": 100},
+                headers={"x-goog-api-key": resolved_key},
+                params={"pageSize": 100},
                 timeout=timeout,
             )
             resp.raise_for_status()
             raw = resp.json().get("models") or []
-            names = sorted(
-                {str(m.get("name", "")).removeprefix("models/") for m in raw if m.get("name")}
+            names = _filter_discovered_models(
+                "google",
+                [
+                    str(m.get("name", "")).removeprefix("models/")
+                    for m in raw
+                    if m.get("name")
+                    and (
+                        "supportedGenerationMethods" not in m
+                        or "generateContent" in (m.get("supportedGenerationMethods") or [])
+                    )
+                ],
             )
         elif spec.protocol == "anthropic":
             resp = httpx.get(
                 f"{resolved_url}/models",
                 headers={"x-api-key": resolved_key, "anthropic-version": "2023-06-01"},
+                params={"limit": 100},
                 timeout=timeout,
             )
             resp.raise_for_status()
@@ -735,7 +880,10 @@ def test_provider_connection(
             headers = {"Authorization": f"Bearer {resolved_key}"} if resolved_key else {}
             resp = httpx.get(f"{resolved_url}/models", headers=headers, timeout=timeout)
             resp.raise_for_status()
-            names = sorted({str(m.get("id", "")) for m in (resp.json().get("data") or []) if m.get("id")})
+            names = _filter_discovered_models(
+                spec.id,
+                [str(m.get("id", "")) for m in (resp.json().get("data") or []) if m.get("id")],
+            )
 
         return {
             "provider": spec.id,
@@ -825,6 +973,10 @@ def check_endpoint_ready(endpoint: ProviderEndpoint, *, require_vision: bool = F
         )
     if not endpoint.model.strip():
         raise ProviderError(f"Model name is required for {spec.label}.")
+    if require_vision and spec.id == "deepseek" and endpoint.model.strip().lower() in DEEPSEEK_TEXT_ONLY_MODELS:
+        raise ProviderError(
+            f"DeepSeek model '{endpoint.model}' does not support Vision inputs. Select 'deepseek-ocr' or 'deepseek-flash' instead."
+        )
     if spec.protocol == "ollama":
         check_ollama_ready(resolve_base_url(spec.id, endpoint.base_url), endpoint.model)
         return
