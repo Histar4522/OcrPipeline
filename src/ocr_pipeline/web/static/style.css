@@ -19,6 +19,11 @@ textarea {
   border-color: #0d6efd !important;
 }
 
+.selected-files-list {
+  max-height: 190px;
+  overflow-y: auto;
+}
+
 .job-history-list {
   max-height: 280px;
   overflow-y: auto;

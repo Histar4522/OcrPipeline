@@ -215,11 +215,15 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
             variant: "danger",
           });
           if (!force) return;
-          await deleteArtifactFolder(folder.path, true);
-          if (artState.selected?.path.startsWith(`${folder.path}/`)) clearSelection();
-          showToast("Folder Deleted", folder.path);
-          await refresh();
-          notifyChanged();
+          try {
+            await deleteArtifactFolder(folder.path, true);
+            if (artState.selected?.path.startsWith(`${folder.path}/`)) clearSelection();
+            showToast("Folder Deleted", folder.path);
+            await refresh();
+            notifyChanged();
+          } catch (err2) {
+            showToast("Delete Failed", err2.message, "danger");
+          }
         } else {
           showToast("Delete Failed", err.message, "danger");
         }

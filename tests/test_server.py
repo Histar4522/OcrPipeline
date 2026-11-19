@@ -42,11 +42,25 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert "katex" in home.text.lower()
     assert 'id="wizardView"' in home.text
     assert 'id="wizardModal"' not in home.text
+    for elem_id in ("selectFilesBtn", "selectFolderBtn", "clearSelectedFilesBtn", "selectedFilesList"):
+        assert f'id="{elem_id}"' in home.text
+    for val in ("always", "not_in_focus", "minimized", "never"):
+        assert f'value="{val}"' in home.text
+
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200
+    assert "STATUS_BADGE_MAP" in app_js.text
+    assert 'waiting: "text-bg-info"' in app_js.text
 
     sys_info = client.get("/api/system-info")
     assert sys_info.status_code == 200
     assert sys_info.json()["ram_gb"] > 0
     assert sys_info.json()["cpu_count"] >= 1
+
+    dialogs_js = client.get("/static/dialogs.js")
+    assert dialogs_js.status_code == 200
+    assert "runModal" in dialogs_js.text
+    assert "hidden.bs.modal" in dialogs_js.text
 
     for asset in ("/static/app.js", "/static/markdown.js", "/static/dialogs.js", "/static/tag_input.js"):
         js = client.get(asset)
@@ -63,7 +77,7 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["setup_completed"] is False
-    assert health.json()["version"] == "0.2.0"
+    assert health.json()["version"] == "0.2.1"
     assert health.json()["license"] == "MIT OR Apache-2.0"
     assert "Weien Xu" in health.json()["copyright"]
 
@@ -299,3 +313,172 @@ def test_web_ui_cancel_job(tmp_path: Path) -> None:
         job_data = client.get(f"/api/jobs/{job_id}").json()
 
     assert job_data["status"] == "cancelled"
+
+
+def test_job_with_selected_paths_and_duplicate_names(tmp_path: Path) -> None:
+    import json
+
+    ocr_calls = 0
+
+    def fake_ocr(image_b64: str, cfg: OcrConfig, client: object) -> str:
+        nonlocal ocr_calls
+        ocr_calls += 1
+        return f"Page {ocr_calls}"
+
+    client = _make_test_app(tmp_path, ocr_fn=fake_ocr)
+    dir_a = tmp_path / "src_a"
+    dir_b = tmp_path / "src_b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    img_a = dir_a / "page.png"
+    img_b = dir_b / "page.png"
+    img_a.write_bytes(_png_bytes())
+    img_b.write_bytes(_png_bytes())
+
+    missing_resp = client.post(
+        "/api/jobs",
+        data={
+            "source_mode": "upload",
+            "selected_paths": json.dumps([{"path": str(tmp_path / "missing.png"), "rel": "missing.png"}]),
+        },
+    )
+    assert missing_resp.status_code == 400
+
+    resp = client.post(
+        "/api/jobs",
+        data={
+            "source_mode": "upload",
+            "series_mode": "true",
+            "selected_paths": json.dumps([
+                {"path": str(img_a), "rel": "page.png"},
+                {"path": str(img_b), "rel": "page.png"},
+            ]),
+        },
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    deadline = time.time() + 5.0
+    job_data = resp.json()
+    while job_data["status"] not in ("completed", "failed") and time.time() < deadline:
+        time.sleep(0.05)
+        job_data = client.get(f"/api/jobs/{job_id}").json()
+
+    assert job_data["status"] == "completed"
+    assert ocr_calls == 2
+
+
+def test_desktop_file_selection_and_platform_open(tmp_path: Path, monkeypatch: object) -> None:
+    import os
+    from webview.util import parse_file_type
+
+    from ocr_pipeline import desktop, platform_utils
+
+    for spec in desktop._PICK_FILE_TYPES:
+        desc, exts = parse_file_type(spec)
+        assert desc and exts
+
+    folder = tmp_path / "notes"
+    hidden = folder / ".git"
+    nested = folder / "sub"
+    folder.mkdir()
+    hidden.mkdir()
+    nested.mkdir()
+    f1 = folder / "p1.png"
+    f2 = nested / "p2.pdf"
+    f_hidden = hidden / "secret.png"
+    f_ignored = folder / "readme.txt"
+    for p in (f1, f2, f_hidden):
+        p.write_bytes(_png_bytes())
+    f_ignored.write_text("ignore", encoding="utf-8")
+
+    collected = desktop.collect_supported_files([str(f1), str(folder)])
+    assert [c["rel"] for c in collected] == ["p1.png", "notes/sub/p2.pdf"]
+
+    opened: list[Path] = []
+    revealed: list[Path] = []
+    monkeypatch.setattr(desktop, "open_with_default_app", lambda p: opened.append(p))  # type: ignore[attr-defined]
+    monkeypatch.setattr(desktop, "open_in_file_manager", lambda p: revealed.append(p))  # type: ignore[attr-defined]
+
+    api = desktop.DesktopApi("http://127.0.0.1:8000", {"win": None})
+    assert api.open_file(str(f1))["ok"] is False
+    assert api.reveal_file(str(f1))["ok"] is False
+
+    api.register_paths([str(f1)])
+    assert api.open_file(str(f1)) == {"ok": True}
+    assert api.reveal_file(str(f1)) == {"ok": True}
+    assert opened == [f1.resolve()]
+    assert revealed == [f1.resolve()]
+
+    # Verify Windows explorer /select and os.startfile invocation
+    monkeypatch.undo()
+    popen_calls: list[list[str]] = []
+    startfile_calls: list[str] = []
+    monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")  # type: ignore[attr-defined]
+    monkeypatch.setattr(platform_utils.subprocess, "Popen", lambda args, **kw: popen_calls.append(args))  # type: ignore[attr-defined]
+    monkeypatch.setattr(os, "startfile", lambda s: startfile_calls.append(s), raising=False)  # type: ignore[attr-defined]
+
+    platform_utils.open_in_file_manager(f1)
+    platform_utils.open_with_default_app(f1)
+    assert popen_calls == [["explorer", "/select,", str(f1.resolve())]]
+    assert startfile_calls == [str(f1.resolve())]
+
+
+def test_job_queue_waiting_classification_and_cancel(tmp_path: Path) -> None:
+    job1_started = threading.Event()
+    release_job1 = threading.Event()
+    processed_labels: list[str] = []
+
+    def gated_ocr(image_b64: str, cfg: OcrConfig, client: object) -> str:
+        if not job1_started.is_set():
+            job1_started.set()
+            release_job1.wait(timeout=4.0)
+        processed_labels.append("page")
+        return "done"
+
+    client = _make_test_app(tmp_path, ocr_fn=gated_ocr)
+
+    r1 = client.post(
+        "/api/jobs",
+        data={"source_mode": "upload", "job_name": "job_one"},
+        files=[("files", ("p1.png", _png_bytes(), "image/png"))],
+    )
+    assert r1.status_code == 200
+    j1 = r1.json()["job_id"]
+    assert job1_started.wait(timeout=2.0)
+
+    r2 = client.post(
+        "/api/jobs",
+        data={"source_mode": "upload", "job_name": "job_two"},
+        files=[("files", ("p2.png", _png_bytes(), "image/png"))],
+    )
+    r3 = client.post(
+        "/api/jobs",
+        data={"source_mode": "upload", "job_name": "job_three"},
+        files=[("files", ("p3.png", _png_bytes(), "image/png"))],
+    )
+    assert r2.status_code == 200 and r3.status_code == 200
+    j2 = r2.json()["job_id"]
+    j3 = r3.json()["job_id"]
+
+    assert client.get(f"/api/jobs/{j2}").json()["status"] == "waiting"
+    assert client.get(f"/api/jobs/{j3}").json()["status"] == "waiting"
+    assert processed_labels == []
+
+    cancel_j3 = client.post(f"/api/jobs/{j3}/cancel")
+    assert cancel_j3.status_code == 200
+    assert cancel_j3.json()["status"] == "cancelled"
+
+    release_job1.set()
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        s1 = client.get(f"/api/jobs/{j1}").json()["status"]
+        s2 = client.get(f"/api/jobs/{j2}").json()["status"]
+        if s1 == "completed" and s2 == "completed":
+            break
+        time.sleep(0.05)
+
+    assert client.get(f"/api/jobs/{j1}").json()["status"] == "completed"
+    assert client.get(f"/api/jobs/{j2}").json()["status"] == "completed"
+    assert client.get(f"/api/jobs/{j3}").json()["status"] == "cancelled"
+    assert len(processed_labels) == 2

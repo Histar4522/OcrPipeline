@@ -10,6 +10,19 @@ from .artifacts import ensure_obsidian_vault
 from .config import DEFAULT_SYSTEM_PROMPT
 
 APP_NAME = "OcrPipeline"
+NOTIFICATION_MODES = ("always", "not_in_focus", "minimized", "never")
+
+
+def normalize_notification_mode(value: object) -> str:
+    """Coerce legacy boolean or string notification setting into a valid NOTIFICATION_MODES value."""
+    if isinstance(value, bool):
+        return "always" if value else "never"
+    text = str(value or "").strip().lower()
+    if text in NOTIFICATION_MODES:
+        return text
+    if text in ("false", "off", "0", "none"):
+        return "never"
+    return "always"
 
 
 def default_config_path() -> Path:
@@ -40,13 +53,14 @@ class AppSettings:
     num_ctx: int = 4096
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     minimize_to_tray: bool = True
-    desktop_notifications: bool = True
+    desktop_notifications: str = "always"
     obsidian_mode: bool = False
     theme: str = "auto"
 
     def __post_init__(self) -> None:
         if not self.archive_dir:
             self.archive_dir = str(default_archive_dir())
+        self.desktop_notifications = normalize_notification_mode(self.desktop_notifications)
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -94,17 +94,21 @@
                       <p class="mb-1 fw-medium">Drag & drop PDFs or images here</p>
                       <p class="text-muted small mb-2">Or select individual files / an entire folder</p>
                       <div class="d-flex justify-content-center gap-2">
-                        <label class="btn btn-sm btn-outline-primary mb-0">
-                          Select Files
-                          <input id="fileInput" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp" hidden />
-                        </label>
-                        <label class="btn btn-sm btn-outline-secondary mb-0">
-                          Select Folder
-                          <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
-                        </label>
+                        <button id="selectFilesBtn" type="button" class="btn btn-sm btn-outline-primary">Select Files</button>
+                        <button id="selectFolderBtn" type="button" class="btn btn-sm btn-outline-secondary">Select Folder</button>
                       </div>
                     </div>
-                    <div id="selectedFilesInfo" class="small text-muted">No files selected.</div>
+                    <input id="fileInput" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp" hidden />
+                    <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
+                    <div id="selectedFilesPanel" class="mt-2">
+                      <div class="d-flex justify-content-between align-items-center mb-1">
+                        <span id="selectedFilesInfo" class="small text-muted">No files selected.</span>
+                        <button id="clearSelectedFilesBtn" type="button" class="btn btn-xs btn-outline-secondary d-none">
+                          <i class="bi bi-x-lg me-1"></i>Clear
+                        </button>
+                      </div>
+                      <div id="selectedFilesList" class="list-group list-group-flush border rounded selected-files-list d-none"></div>
+                    </div>
                   </div>
                   <div class="tab-pane fade" id="tabLocal">
                     <div class="mb-2">
@@ -432,20 +436,23 @@
               </div>
               <textarea id="setSystemPrompt" class="form-control form-control-sm" rows="5"></textarea>
             </div>
-            <div class="col-md-4">
-              <div class="form-check form-switch">
+            <div class="col-md-4 d-flex align-items-center">
+              <div class="form-check form-switch mb-0">
                 <input id="setMinimizeTray" class="form-check-input" type="checkbox" />
                 <label class="form-check-label small" for="setMinimizeTray">Minimize to tray on close</label>
               </div>
             </div>
-            <div class="col-md-4">
-              <div class="form-check form-switch">
-                <input id="setDesktopNotify" class="form-check-input" type="checkbox" />
-                <label class="form-check-label small" for="setDesktopNotify">Toast when job finishes</label>
-              </div>
+            <div class="col-md-4 d-flex align-items-center gap-2">
+              <label class="form-label small mb-0 text-nowrap" for="setDesktopNotify">Toast notify</label>
+              <select id="setDesktopNotify" class="form-select form-select-sm">
+                <option value="always">Always</option>
+                <option value="not_in_focus">Not in focus</option>
+                <option value="minimized">Minimized to tray</option>
+                <option value="never">Never</option>
+              </select>
             </div>
-            <div class="col-md-4">
-              <div class="form-check form-switch">
+            <div class="col-md-4 d-flex align-items-center">
+              <div class="form-check form-switch mb-0">
                 <input id="setObsidianMode" class="form-check-input" type="checkbox" />
                 <label class="form-check-label small" for="setObsidianMode">Obsidian Vault Mode</label>
               </div>
@@ -462,7 +469,7 @@
         <div class="card-header fw-semibold"><i class="bi bi-info-circle me-1"></i> About OcrPipeline</div>
         <div class="card-body small text-muted d-flex flex-wrap justify-content-between align-items-center gap-2">
           <div>
-            <strong class="text-body">OcrPipeline</strong> <span id="aboutVersion">v0.2.0</span> ·
+            <strong class="text-body">OcrPipeline</strong> <span id="aboutVersion">v0.2.1</span> ·
             Dual-licensed under <span id="aboutLicense">MIT / Apache-2.0</span>
           </div>
           <div id="aboutCopyright">© 2026 Weien Xu</div>
@@ -472,7 +479,7 @@
   </main>
 
   <footer id="mainFooter" class="border-top bg-body py-2 px-4 small text-muted d-flex justify-content-between mt-auto">
-    <span id="footerVersion">OcrPipeline v0.2.0</span>
+    <span id="footerVersion">OcrPipeline v0.2.1</span>
     <span id="footerLicense">MIT / Apache-2.0 · © 2026 Weien Xu</span>
   </footer>
 
@@ -609,9 +616,14 @@
                   <input id="wizTray" type="checkbox" class="form-check-input" checked />
                   <label class="form-check-label" for="wizTray"><strong>Keep in System Tray</strong> — Closing the window keeps background OCR jobs running</label>
                 </div>
-                <div class="form-check form-switch">
-                  <input id="wizNotify" type="checkbox" class="form-check-input" checked />
-                  <label class="form-check-label" for="wizNotify"><strong>Desktop Toast Notifications</strong> — Notify when OCR jobs finish</label>
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                  <label class="form-check-label" for="wizNotify"><strong>Desktop Toast Notifications</strong> — When to notify when OCR jobs finish</label>
+                  <select id="wizNotify" class="form-select form-select-sm" style="width: auto; min-width: 170px;">
+                    <option value="always">Always</option>
+                    <option value="not_in_focus">Not in focus</option>
+                    <option value="minimized">Minimized to tray</option>
+                    <option value="never">Never</option>
+                  </select>
                 </div>
               </div>
             </div>

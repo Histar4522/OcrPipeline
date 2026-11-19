@@ -154,17 +154,158 @@ async function syncSettingsToJobForm() {
   updatePullButton();
 }
 
-function updateSelectedFiles(files) {
-  state.selectedFiles = Array.from(files);
-  const info = el("selectedFilesInfo");
-  if (!state.selectedFiles.length) {
-    info.textContent = "No files selected.";
+function formatBytes(bytes) {
+  if (!bytes) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function openSelectedFile(item) {
+  if (item.path && window.pywebview?.api?.open_file) {
+    try {
+      const res = await window.pywebview.api.open_file(item.path);
+      if (!res?.ok) showToast("Open Failed", res?.error || "Could not open file.", "danger");
+    } catch (err) {
+      showToast("Open Failed", err?.message || String(err), "danger");
+    }
     return;
   }
-  const preview = state.selectedFiles.slice(0, 3).map((f) => f.webkitRelativePath || f.name).join(", ");
-  const extra = state.selectedFiles.length > 3 ? ` (+${state.selectedFiles.length - 3} more)` : "";
-  info.textContent = `${state.selectedFiles.length} file(s) ready: ${preview}${extra}`;
+  if (item.file) {
+    const url = URL.createObjectURL(item.file);
+    window.open(url, "_blank", "noopener");
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
 }
+
+async function revealSelectedFile(item) {
+  if (!item.path || !window.pywebview?.api?.reveal_file) return;
+  try {
+    const res = await window.pywebview.api.reveal_file(item.path);
+    if (!res?.ok) showToast("Open Folder Failed", res?.error || "Could not reveal file.", "danger");
+  } catch (err) {
+    showToast("Open Folder Failed", err?.message || String(err), "danger");
+  }
+}
+
+function renderSelectedFiles() {
+  const info = el("selectedFilesInfo");
+  const clearBtn = el("clearSelectedFilesBtn");
+  const list = el("selectedFilesList");
+  const count = state.selectedFiles.length;
+
+  info.textContent = count ? `${count} file(s) ready:` : "No files selected.";
+  clearBtn.classList.toggle("d-none", count === 0);
+  list.classList.toggle("d-none", count === 0);
+  list.innerHTML = "";
+
+  for (const item of state.selectedFiles) {
+    const row = document.createElement("div");
+    row.className = "list-group-item d-flex align-items-center justify-content-between gap-2 py-1 px-2 small";
+
+    const isPdf = item.name.toLowerCase().endsWith(".pdf");
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "btn btn-link btn-sm p-0 text-start text-decoration-none text-body text-truncate flex-grow-1 d-flex align-items-center gap-1 open-file-btn";
+    openBtn.title = item.path ? `${item.path} — Click to open` : `${item.rel} — Click to preview`;
+    const icon = document.createElement("i");
+    icon.className = isPdf ? "bi bi-file-earmark-pdf text-danger flex-shrink-0" : "bi bi-file-earmark-image text-primary flex-shrink-0";
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "text-truncate";
+    nameSpan.textContent = item.rel;
+    openBtn.append(icon, nameSpan);
+    openBtn.addEventListener("click", () => openSelectedFile(item));
+
+    const actions = document.createElement("div");
+    actions.className = "d-flex align-items-center gap-1 flex-shrink-0";
+
+    const sizeEl = document.createElement("small");
+    sizeEl.className = "text-muted text-nowrap me-1";
+    sizeEl.textContent = formatBytes(item.size);
+    actions.appendChild(sizeEl);
+
+    if (item.path && window.pywebview?.api?.reveal_file) {
+      const revealBtn = document.createElement("button");
+      revealBtn.type = "button";
+      revealBtn.className = "btn btn-xs btn-outline-secondary py-0 px-1 reveal-file-btn";
+      revealBtn.title = "Show in folder";
+      revealBtn.innerHTML = '<i class="bi bi-folder2-open"></i>';
+      revealBtn.addEventListener("click", () => revealSelectedFile(item));
+      actions.appendChild(revealBtn);
+    }
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "btn btn-xs btn-outline-danger py-0 px-1 remove-file-btn";
+    removeBtn.title = "Remove file";
+    removeBtn.innerHTML = '<i class="bi bi-x-lg"></i>';
+    removeBtn.addEventListener("click", () => {
+      state.selectedFiles = state.selectedFiles.filter((f) => f.key !== item.key);
+      renderSelectedFiles();
+    });
+    actions.appendChild(removeBtn);
+
+    row.append(openBtn, actions);
+    list.appendChild(row);
+  }
+}
+
+function addSelectedFiles(entries) {
+  const existing = new Set(state.selectedFiles.map((f) => f.key));
+  for (const entry of entries) {
+    if (!existing.has(entry.key)) {
+      state.selectedFiles.push(entry);
+      existing.add(entry.key);
+    }
+  }
+  renderSelectedFiles();
+}
+
+function addBrowserFiles(fileList) {
+  const entries = Array.from(fileList || []).map((f) => {
+    const rel = f.webkitRelativePath || f.name;
+    return {
+      key: `file:${rel}:${f.size}:${f.lastModified}`,
+      name: f.name,
+      rel,
+      path: null,
+      size: f.size,
+      file: f,
+    };
+  });
+  addSelectedFiles(entries);
+}
+
+function addNativeFiles(items) {
+  const entries = (items || []).map((it) => ({
+    key: `path:${it.path}`,
+    name: it.name,
+    rel: it.rel || it.name,
+    path: it.path,
+    size: it.size || 0,
+    file: null,
+  }));
+  addSelectedFiles(entries);
+}
+
+window.__addNativeSelectedFiles = addNativeFiles;
+
+function clearSelectedFiles() {
+  state.selectedFiles = [];
+  el("fileInput").value = "";
+  el("folderInput").value = "";
+  renderSelectedFiles();
+}
+
+const STATUS_BADGE_MAP = {
+  waiting: "text-bg-info",
+  queued: "text-bg-info",
+  running: "text-bg-primary",
+  completed: "text-bg-success",
+  cancelled: "text-bg-warning",
+  cancelling: "text-bg-warning",
+  failed: "text-bg-danger",
+};
 
 function renderJobHistory(jobs) {
   el("jobCountBadge").textContent = String(jobs.length);
@@ -177,14 +318,18 @@ function renderJobHistory(jobs) {
   for (const j of jobs) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = `list-group-item list-group-item-action ${j.job_id === state.activeJobId ? "active" : ""}`;
+    const isSelected = j.job_id === state.activeJobId;
+    btn.className = `list-group-item list-group-item-action ${isSelected ? "active" : ""}`;
+    const badgeColor = STATUS_BADGE_MAP[j.status] || "text-bg-secondary";
+    const activeBorder = isSelected && j.status === "running" ? "border border-light border-opacity-50" : "";
     btn.innerHTML = `
       <div class="d-flex justify-content-between align-items-center">
         <span class="fw-semibold text-truncate me-2"></span>
-        <span class="badge text-bg-secondary">${j.status}</span>
+        <span class="badge ${badgeColor} ${activeBorder}"></span>
       </div>
       <div class="small opacity-75">${j.model} · ${j.completed_docs}/${j.total_docs} docs</div>`;
     btn.querySelector("span").textContent = j.label;
+    btn.querySelector(".badge").textContent = j.status;
     btn.addEventListener("click", () => selectJob(j.job_id));
     list.appendChild(btn);
   }
@@ -225,19 +370,20 @@ function renderJobDetail(job) {
   el("detailTitle").textContent = `${job.label} (${job.job_id})`;
 
   const badge = el("detailStatusBadge");
-  const badgeMap = { completed: "text-bg-success", failed: "text-bg-danger", cancelled: "text-bg-warning", cancelling: "text-bg-warning", running: "text-bg-primary" };
-  badge.className = `badge ms-2 ${badgeMap[job.status] || "text-bg-secondary"}`;
+  badge.className = `badge ms-2 ${STATUS_BADGE_MAP[job.status] || "text-bg-secondary"}`;
   badge.textContent = job.status;
   el("detailMeta").textContent = `Model: ${job.model} | DPI: ${job.dpi} | Output: ${job.output_dir}`;
   const etaText =
     job.status === "completed"
       ? "Done"
-      : job.eta_seconds !== null && job.eta_seconds !== undefined
-        ? `~${formatDuration(job.eta_seconds)}`
-        : "Calculating...";
+      : job.status === "waiting"
+        ? "Waiting in queue..."
+        : job.eta_seconds !== null && job.eta_seconds !== undefined
+          ? `~${formatDuration(job.eta_seconds)}`
+          : "Calculating...";
   el("detailTiming").textContent = `Elapsed: ${formatDuration(job.elapsed_seconds)} · ETA: ${etaText}`;
 
-  const isActive = job.status === "queued" || job.status === "running";
+  const isActive = job.status === "waiting" || job.status === "queued" || job.status === "running";
   el("cancelJobBtn").classList.toggle("d-none", !isActive);
   el("cancelJobBtn").disabled = job.status === "cancelling";
 
@@ -291,7 +437,8 @@ async function refreshActiveJob() {
   renderJobHistory(allJobs);
   renderJobDetail(job);
   el("logViewer").textContent = logText;
-  if (["completed", "failed", "cancelled"].includes(job.status)) {
+  const anyRunning = allJobs.some((j) => !["completed", "failed", "cancelled"].includes(j.status));
+  if (!anyRunning) {
     clearInterval(state.pollTimer);
     state.pollTimer = null;
     fetchArtifacts().then((d) => jobTagEditor.setSuggestions((d.tags || []).map((t) => t.name))).catch(() => {});
@@ -398,17 +545,50 @@ el("cancelJobBtn").addEventListener("click", async () => {
 
 el("tabUploadBtn").addEventListener("click", () => (state.sourceMode = "upload"));
 el("tabLocalBtn").addEventListener("click", () => (state.sourceMode = "local"));
-el("fileInput").addEventListener("change", (e) => updateSelectedFiles(e.target.files));
-el("folderInput").addEventListener("change", (e) => updateSelectedFiles(e.target.files));
+el("selectFilesBtn").addEventListener("click", async () => {
+  if (window.pywebview?.api?.pick_files) {
+    try {
+      const items = await window.pywebview.api.pick_files();
+      if (items?.length) addNativeFiles(items);
+    } catch (err) {
+      showToast("Select Files Failed", err?.message || String(err), "danger");
+    }
+    return;
+  }
+  el("fileInput").click();
+});
+el("selectFolderBtn").addEventListener("click", async () => {
+  if (window.pywebview?.api?.pick_folder) {
+    try {
+      const items = await window.pywebview.api.pick_folder();
+      if (items?.length) addNativeFiles(items);
+    } catch (err) {
+      showToast("Select Folder Failed", err?.message || String(err), "danger");
+    }
+    return;
+  }
+  el("folderInput").click();
+});
+el("fileInput").addEventListener("change", (e) => {
+  if (e.target.files?.length) addBrowserFiles(e.target.files);
+  e.target.value = "";
+});
+el("folderInput").addEventListener("change", (e) => {
+  if (e.target.files?.length) addBrowserFiles(e.target.files);
+  e.target.value = "";
+});
+el("clearSelectedFilesBtn").addEventListener("click", clearSelectedFiles);
 
 const dz = el("dropZone");
-dz.addEventListener("click", (e) => { if (!e.target.closest("label, input, button")) el("fileInput").click(); });
+dz.addEventListener("click", (e) => { if (!e.target.closest("label, input, button")) el("selectFilesBtn").click(); });
 dz.addEventListener("dragover", (e) => { e.preventDefault(); dz.classList.add("drag-over"); });
 dz.addEventListener("dragleave", () => dz.classList.remove("drag-over"));
 dz.addEventListener("drop", (e) => {
   e.preventDefault();
   dz.classList.remove("drag-over");
-  if (e.dataTransfer?.files?.length) updateSelectedFiles(e.dataTransfer.files);
+  if (!window.pywebview?.api?.pick_files && e.dataTransfer?.files?.length) {
+    addBrowserFiles(e.dataTransfer.files);
+  }
 });
 
 el("toggleRawBtn").addEventListener("click", () => {
@@ -472,11 +652,17 @@ el("jobForm").addEventListener("submit", async (e) => {
   fd.append("series_mode", String(el("seriesSwitch").checked));
   fd.append("force", String(el("forceSwitch").checked));
   if (state.sourceMode === "upload") {
-    for (const f of state.selectedFiles) fd.append("files", f, f.webkitRelativePath || f.name);
+    const nativeEntries = [];
+    for (const item of state.selectedFiles) {
+      if (item.path) nativeEntries.push({ path: item.path, rel: item.rel });
+      else if (item.file) fd.append("files", item.file, item.rel);
+    }
+    if (nativeEntries.length) fd.append("selected_paths", JSON.stringify(nativeEntries));
   }
   el("startBtn").disabled = true;
   try {
     const job = await startJob(fd);
+    if (state.sourceMode === "upload") clearSelectedFiles();
     state.lastJobStatuses.set(job.job_id, job.status);
     renderJobHistory(await fetchJobs());
     selectJob(job.job_id);
@@ -496,7 +682,16 @@ document.querySelectorAll("#themeMenu [data-theme]").forEach((btn) => {
   });
 });
 
+function syncWindowFocus(focused) {
+  window.pywebview?.api?.set_focus?.(focused);
+}
+
+window.addEventListener("focus", () => syncWindowFocus(true));
+window.addEventListener("blur", () => syncWindowFocus(false));
+window.addEventListener("pywebviewready", () => syncWindowFocus(document.hasFocus()));
+
 (async () => {
+  syncWindowFocus(document.hasFocus());
   const health = await fetchHealth();
   el("aboutVersion").textContent = `v${health.version}`;
   el("aboutLicense").textContent = health.license;

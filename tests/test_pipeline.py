@@ -80,3 +80,155 @@ def test_runner_combines_pages_and_resumes(tmp_path: Path) -> None:
     assert summary2.processed_docs == 0
     assert summary2.skipped_docs == 1
     assert len(calls) == 3
+
+
+def test_render_pdf_page_caps_dimensions_and_prefetch_overlaps_and_logs(tmp_path: Path) -> None:
+    import time
+
+    from ocr_pipeline.preprocess import render_pdf_page
+
+    pdf_path = tmp_path / "prefetch.pdf"
+    _make_pdf(pdf_path, num_pages=3)
+    with pymupdf.open(pdf_path) as doc:
+        capped = render_pdf_page(doc, 0, dpi=300, max_dim=512)
+        assert max(capped.width, capped.height) == 512
+        assert capped.size_bytes > 0
+        assert capped.prep_seconds >= 0.0
+
+    out_dir = tmp_path / "archive"
+    tasks = discover_documents(pdf_path, out_dir)
+    config = OcrConfig(dpi=150, max_image_dim=1024)
+
+    def fake_ocr(
+        image_b64: str,
+        cfg: OcrConfig,
+        client: object,
+        metrics_out: dict[str, object] | None = None,
+    ) -> str:
+        assert len(image_b64) > 20
+        time.sleep(0.12)
+        if metrics_out is not None:
+            metrics_out.update(
+                {
+                    "total_duration": 120_000_000,
+                    "load_duration": 10_000_000,
+                    "prompt_eval_count": 512,
+                    "prompt_eval_duration": 40_000_000,
+                    "eval_count": 64,
+                    "eval_duration": 50_000_000,
+                    "done_reason": "stop",
+                }
+            )
+        return "Transcribed page"
+
+    summary = run_pipeline(tasks, out_dir, config, ocr_fn=fake_ocr)
+    assert summary.processed_docs == 1
+    assert summary.failed_pages == 0
+
+    log_lines = (out_dir / "ocr_pipeline.log").read_text(encoding="utf-8").splitlines()
+    log_text = "\n".join(log_lines)
+    for marker in ("DOC START:", "PREP:", "OCR START:", "OK:", "ollama:", "tok/s", "SAVED:", "Finished OCR run:"):
+        assert marker in log_text
+
+    prep2_idx = next(i for i, line in enumerate(log_lines) if "PREP:" in line and "page 2/3" in line)
+    ok1_idx = next(i for i, line in enumerate(log_lines) if "OK:" in line and "page 1/3" in line)
+    assert prep2_idx < ok1_idx
+
+
+def test_cache_hit_skips_pdf_rendering(tmp_path: Path, monkeypatch: object) -> None:
+    import ocr_pipeline.runner as runner_mod
+
+    pdf_path = tmp_path / "cached.pdf"
+    _make_pdf(pdf_path, num_pages=2)
+    out_dir = tmp_path / "archive"
+    tasks = discover_documents(pdf_path, out_dir)
+    config = OcrConfig(dpi=72, max_image_dim=512)
+
+    cache_dir = runner_mod._doc_cache_dir(out_dir.resolve(), tasks[0], config)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "page_00001.md").write_text("Cached page 1", encoding="utf-8")
+
+    rendered_indices: list[int] = []
+    real_render = runner_mod.render_pdf_page
+
+    def tracked_render(doc: pymupdf.Document, page_index: int, dpi: int = 220, max_dim: int = 1536):
+        rendered_indices.append(page_index)
+        return real_render(doc, page_index, dpi=dpi, max_dim=max_dim)
+
+    monkeypatch.setattr(runner_mod, "render_pdf_page", tracked_render)  # type: ignore[attr-defined]
+    summary = run_pipeline(tasks, out_dir, config, ocr_fn=lambda b64, cfg, c: "Live page 2")
+    assert summary.processed_docs == 1
+    assert rendered_indices == [1]
+
+    md_text = (out_dir / "cached.md").read_text(encoding="utf-8")
+    assert "Cached page 1" in md_text
+    assert "Live page 2" in md_text
+
+
+def test_ocr_image_b64_populates_metrics_out() -> None:
+    import httpx
+
+    from ocr_pipeline.ollama_client import ocr_image_b64
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "message": {"content": "  Hello OCR  "},
+                "total_duration": 2_000_000_000,
+                "load_duration": 100_000_000,
+                "prompt_eval_count": 300,
+                "prompt_eval_duration": 400_000_000,
+                "eval_count": 150,
+                "eval_duration": 1_500_000_000,
+                "done_reason": "stop",
+            },
+        )
+
+    metrics: dict[str, object] = {}
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        text = ocr_image_b64("QUJD", OcrConfig(), client=client, metrics_out=metrics)
+
+    assert text == "Hello OCR"
+    assert metrics["total_duration"] == 2_000_000_000
+    assert metrics["prompt_eval_count"] == 300
+    assert metrics["eval_count"] == 150
+    assert metrics["done_reason"] == "stop"
+
+
+def test_prefetch_cancellation_stops_cleanly(tmp_path: Path) -> None:
+    import threading
+
+    pdf_path = tmp_path / "cancel.pdf"
+    _make_pdf(pdf_path, num_pages=5)
+    out_dir = tmp_path / "archive"
+    tasks = discover_documents(pdf_path, out_dir)
+    config = OcrConfig(dpi=72, max_image_dim=512)
+
+    started = threading.Event()
+    cancel_event = threading.Event()
+
+    def slow_ocr(
+        image_b64: str,
+        cfg: OcrConfig,
+        client: object,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        started.set()
+        if cancel_event is not None:
+            cancel_event.wait(timeout=3.0)
+        return "partial"
+
+    def trigger_cancel() -> None:
+        if started.wait(timeout=2.0):
+            cancel_event.set()
+
+    canceller = threading.Thread(target=trigger_cancel, daemon=True)
+    canceller.start()
+    summary = run_pipeline(tasks, out_dir, config, ocr_fn=slow_ocr, cancel_event=cancel_event)
+    canceller.join(timeout=2.0)
+
+    assert summary.cancelled is True
+    # Producer thread must have closed PyMuPDF handle cleanly so file unlink succeeds on Windows
+    pdf_path.unlink()
+    assert not pdf_path.exists()

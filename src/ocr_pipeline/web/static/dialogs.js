@@ -3,6 +3,53 @@
 import { createTagInput } from "./tag_input.js";
 
 const el = (id) => document.getElementById(id);
+const modalQueues = new WeakMap();
+
+/** Serialize calls per modal element and resolve only after Bootstrap finishes hiding. */
+function runModal(modalEl, configure) {
+  const prev = modalQueues.get(modalEl) || Promise.resolve();
+  const run = prev.catch(() => {}).then(
+    () =>
+      new Promise((resolve) => {
+        const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+        let shown = false;
+        let hidePending = false;
+        let decided = false;
+        let result;
+
+        const finish = (val) => {
+          if (decided) return;
+          decided = true;
+          result = val;
+          if (shown) modal.hide();
+          else hidePending = true;
+        };
+
+        const { defaultValue, onShown, bind } = configure(finish);
+        result = defaultValue;
+        const teardown = bind?.();
+
+        const handleShown = () => {
+          shown = true;
+          if (hidePending) modal.hide();
+          else onShown?.();
+        };
+
+        const handleHidden = () => {
+          modalEl.removeEventListener("shown.bs.modal", handleShown);
+          modalEl.removeEventListener("hidden.bs.modal", handleHidden);
+          teardown?.();
+          resolve(result);
+        };
+
+        modalEl.addEventListener("shown.bs.modal", handleShown);
+        modalEl.addEventListener("hidden.bs.modal", handleHidden);
+        modal.show();
+      })
+  );
+  modalQueues.set(modalEl, run);
+  return run;
+}
 
 export function bsConfirm({
   title = "Confirm",
@@ -10,9 +57,8 @@ export function bsConfirm({
   confirmText = "Confirm",
   variant = "danger",
 } = {}) {
-  return new Promise((resolve) => {
-    const modalEl = el("bsConfirmModal");
-    const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+  const modalEl = el("bsConfirmModal");
+  return runModal(modalEl, (finish) => {
     el("bsConfirmTitle").textContent = title;
     el("bsConfirmMessage").textContent = message;
 
@@ -20,23 +66,14 @@ export function bsConfirm({
     okBtn.textContent = confirmText;
     okBtn.className = `btn btn-sm btn-${variant}`;
 
-    let settled = false;
-    const cleanup = (result) => {
-      if (settled) return;
-      settled = true;
-      okBtn.removeEventListener("click", onOk);
-      modalEl.removeEventListener("hidden.bs.modal", onHidden);
-      resolve(result);
+    const onOk = () => finish(true);
+    return {
+      defaultValue: false,
+      bind: () => {
+        okBtn.addEventListener("click", onOk);
+        return () => okBtn.removeEventListener("click", onOk);
+      },
     };
-    const onOk = () => {
-      cleanup(true);
-      modal.hide();
-    };
-    const onHidden = () => cleanup(false);
-
-    okBtn.addEventListener("click", onOk);
-    modalEl.addEventListener("hidden.bs.modal", onHidden);
-    modal.show();
   });
 }
 
@@ -48,9 +85,8 @@ export function bsPrompt({
   confirmText = "Save",
   required = true,
 } = {}) {
-  return new Promise((resolve) => {
-    const modalEl = el("bsPromptModal");
-    const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+  const modalEl = el("bsPromptModal");
+  return runModal(modalEl, (finish) => {
     el("bsPromptTitle").textContent = title;
     el("bsPromptLabel").textContent = label;
     const input = el("bsPromptInput");
@@ -60,37 +96,27 @@ export function bsPrompt({
     el("bsPromptOkBtn").textContent = confirmText;
 
     const form = el("bsPromptForm");
-    let settled = false;
-    const cleanup = (result) => {
-      if (settled) return;
-      settled = true;
-      form.removeEventListener("submit", onSubmit);
-      modalEl.removeEventListener("hidden.bs.modal", onHidden);
-      modalEl.removeEventListener("shown.bs.modal", onShown);
-      resolve(result);
-    };
     const onSubmit = (e) => {
       e.preventDefault();
-      cleanup(input.value);
-      modal.hide();
+      finish(input.value);
     };
-    const onHidden = () => cleanup(null);
-    const onShown = () => {
-      input.focus();
-      input.select();
+    return {
+      defaultValue: null,
+      onShown: () => {
+        input.focus();
+        input.select();
+      },
+      bind: () => {
+        form.addEventListener("submit", onSubmit);
+        return () => form.removeEventListener("submit", onSubmit);
+      },
     };
-
-    form.addEventListener("submit", onSubmit);
-    modalEl.addEventListener("hidden.bs.modal", onHidden);
-    modalEl.addEventListener("shown.bs.modal", onShown);
-    modal.show();
   });
 }
 
 export function bsMoveArtifact({ path = "", currentFolder = "", folders = [] } = {}) {
-  return new Promise((resolve) => {
-    const modalEl = el("moveArtifactModal");
-    const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+  const modalEl = el("moveArtifactModal");
+  return runModal(modalEl, (finish) => {
     el("moveArtifactFileLabel").textContent = path;
 
     const select = el("moveFolderSelect");
@@ -106,34 +132,25 @@ export function bsMoveArtifact({ path = "", currentFolder = "", folders = [] } =
     select.value = folders.includes(currentFolder) ? currentFolder : "";
 
     const form = el("moveArtifactForm");
-    let settled = false;
-    const cleanup = (result) => {
-      if (settled) return;
-      settled = true;
-      form.removeEventListener("submit", onSubmit);
-      modalEl.removeEventListener("hidden.bs.modal", onHidden);
-      resolve(result);
-    };
     const onSubmit = (e) => {
       e.preventDefault();
-      const custom = newInput.value.trim();
-      cleanup(custom || select.value);
-      modal.hide();
+      finish(newInput.value.trim() || select.value);
     };
-    const onHidden = () => cleanup(null);
-
-    form.addEventListener("submit", onSubmit);
-    modalEl.addEventListener("hidden.bs.modal", onHidden);
-    modal.show();
+    return {
+      defaultValue: null,
+      bind: () => {
+        form.addEventListener("submit", onSubmit);
+        return () => form.removeEventListener("submit", onSubmit);
+      },
+    };
   });
 }
 
 let _modalTagEditor = null;
 
 export function bsEditTags({ path = "", initialTags = [], suggestions = [] } = {}) {
-  return new Promise((resolve) => {
-    const modalEl = el("editTagsModal");
-    const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+  const modalEl = el("editTagsModal");
+  return runModal(modalEl, (finish) => {
     el("editTagsFileLabel").textContent = path;
     if (!_modalTagEditor) {
       _modalTagEditor = createTagInput(el("editTagsContainer"));
@@ -142,27 +159,18 @@ export function bsEditTags({ path = "", initialTags = [], suggestions = [] } = {
     _modalTagEditor.setTags(initialTags);
 
     const form = el("editTagsForm");
-    let settled = false;
-    const cleanup = (result) => {
-      if (settled) return;
-      settled = true;
-      form.removeEventListener("submit", onSubmit);
-      modalEl.removeEventListener("hidden.bs.modal", onHidden);
-      modalEl.removeEventListener("shown.bs.modal", onShown);
-      resolve(result);
-    };
     const onSubmit = (e) => {
       e.preventDefault();
-      cleanup(_modalTagEditor.getTags());
-      modal.hide();
+      finish(_modalTagEditor.getTags());
     };
-    const onHidden = () => cleanup(null);
-    const onShown = () => _modalTagEditor.focus();
-
-    form.addEventListener("submit", onSubmit);
-    modalEl.addEventListener("hidden.bs.modal", onHidden);
-    modalEl.addEventListener("shown.bs.modal", onShown);
-    modal.show();
+    return {
+      defaultValue: null,
+      onShown: () => _modalTagEditor.focus(),
+      bind: () => {
+        form.addEventListener("submit", onSubmit);
+        return () => form.removeEventListener("submit", onSubmit);
+      },
+    };
   });
 }
 

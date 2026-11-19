@@ -74,3 +74,35 @@ def test_desktop_api_save_url_writes_chosen_file(tmp_path: Path, monkeypatch: ob
     res = api.save_url("/api/artifacts/content?path=a.md&download=true", "a.md")
     assert res["saved"] is True
     assert dest.read_bytes() == b"# Saved Markdown\n"
+
+
+def test_notification_mode_normalization_and_conditions(tmp_path: Path) -> None:
+    import json
+
+    from ocr_pipeline.desktop import should_send_notification
+    from ocr_pipeline.settings import normalize_notification_mode
+
+    assert normalize_notification_mode(True) == "always"
+    assert normalize_notification_mode(False) == "never"
+    assert normalize_notification_mode("not_in_focus") == "not_in_focus"
+    assert normalize_notification_mode("minimized") == "minimized"
+    assert normalize_notification_mode("unknown") == "always"
+
+    cfg_path = tmp_path / "legacy_settings.json"
+    cfg_path.write_text(json.dumps({"desktop_notifications": False}), encoding="utf-8")
+    assert load_settings(cfg_path).desktop_notifications == "never"
+
+    assert should_send_notification("always", focused=True, in_tray=False, minimized=False) is True
+    assert should_send_notification("never", focused=False, in_tray=True, minimized=True) is False
+    assert should_send_notification("not_in_focus", focused=True, in_tray=False, minimized=False) is False
+    assert should_send_notification("not_in_focus", focused=False, in_tray=False, minimized=False) is True
+    assert should_send_notification("minimized", focused=False, in_tray=False, minimized=False) is False
+    assert should_send_notification("minimized", focused=False, in_tray=True, minimized=False) is True
+    assert should_send_notification("minimized", focused=False, in_tray=False, minimized=True) is True
+
+    win_state = {"focused": True, "in_tray": False, "minimized": False}
+    api = DesktopApi("http://127.0.0.1:9999", {"win": None}, window_state=win_state)
+    api.set_focus(False)
+    assert win_state["focused"] is False
+    api.set_focus(True)
+    assert win_state["focused"] is True

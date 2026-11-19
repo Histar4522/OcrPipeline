@@ -4,9 +4,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 import io
+import json
 import mimetypes
 from pathlib import Path
 import platform
+import queue
+import shutil
 import sys
 import threading
 import uuid
@@ -30,7 +33,7 @@ from ..artifacts import (
     update_artifact_tags,
 )
 from ..config import DEFAULT_SYSTEM_PROMPT, OcrConfig
-from ..discovery import DocumentTask, discover_documents
+from ..discovery import IMAGE_EXTENSIONS, PDF_EXTENSION, DocumentTask, discover_documents
 from ..ollama_client import (
     OllamaError,
     check_ollama_ready,
@@ -44,7 +47,7 @@ from ..ollama_client import (
 )
 from ..platform_utils import generate_app_icon_image, get_system_info, open_in_file_manager
 from ..runner import OcrFn, ProgressEvent, run_pipeline
-from ..settings import AppSettings, default_jobs_dir, load_settings, save_settings
+from ..settings import AppSettings, default_jobs_dir, load_settings, normalize_notification_mode, save_settings
 
 # Ensure .js/.css serve valid MIME types even on Windows where registry maps .js to text/plain
 mimetypes.add_type("application/javascript", ".js")
@@ -106,7 +109,7 @@ class JobState:
     work_dir: Path
     model: str
     dpi: int
-    status: str = "queued"
+    status: str = "waiting"
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     total_docs: int = 0
     completed_docs: int = 0
@@ -154,8 +157,9 @@ class JobState:
         }
 
 
-def _save_uploads(files: list[UploadFile], dest_dir: Path) -> None:
+def _save_uploads(files: list[UploadFile], dest_dir: Path) -> list[str]:
     dest_dir.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
     for upload in files:
         if not upload.filename:
             continue
@@ -163,11 +167,48 @@ def _save_uploads(files: list[UploadFile], dest_dir: Path) -> None:
         safe_parts = [p for p in rel.parts if p not in ("", ".", "..", "/", "\\")]
         if not safe_parts:
             continue
-        target = dest_dir.joinpath(*safe_parts)
+        target = _unique_output_path(dest_dir.joinpath(*safe_parts))
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("wb") as out:
             while chunk := upload.file.read(1024 * 1024):
                 out.write(chunk)
+        saved.append(target.relative_to(dest_dir).as_posix())
+    return saved
+
+
+def _stage_local_files(raw_json: str, dest_dir: Path) -> list[str]:
+    """Copy individually selected local PDF/image files into job input directory."""
+    try:
+        entries = json.loads(raw_json)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid selected_paths payload.") from exc
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="Invalid selected_paths payload.")
+
+    supported = IMAGE_EXTENSIONS | {PDF_EXTENSION}
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    staged: list[str] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            raw_path = str(entry.get("path", "")).strip()
+            raw_rel = str(entry.get("rel", "")).strip()
+        else:
+            raw_path = str(entry).strip()
+            raw_rel = ""
+        if not raw_path:
+            continue
+        src = Path(raw_path).expanduser().resolve()
+        if not src.is_file():
+            raise HTTPException(status_code=400, detail=f"Selected file not found: {src.name}")
+        if src.suffix.lower() not in supported:
+            continue
+        rel = Path((raw_rel or src.name).replace("\\", "/"))
+        safe_parts = [p for p in rel.parts if p not in ("", ".", "..", "/", "\\")] or [src.name]
+        target = _unique_output_path(dest_dir.joinpath(*safe_parts))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
+        staged.append(target.relative_to(dest_dir).as_posix())
+    return staged
 
 
 def _unique_output_path(path: Path) -> Path:
@@ -203,6 +244,7 @@ def create_app(
     root = (jobs_root or default_jobs_dir()).resolve()
     root.mkdir(parents=True, exist_ok=True)
     jobs: dict[str, JobState] = {}
+    job_queue: queue.Queue[tuple[JobState, list[DocumentTask], OcrConfig]] = queue.Queue()
     lock = threading.Lock()
     pull_state: dict = {
         "active": False,
@@ -221,6 +263,71 @@ def create_app(
         if ollama_url:
             cfg.ollama_url = ollama_url
         return cfg
+
+    def _execute_job(state: JobState, tasks: list[DocumentTask], config: OcrConfig) -> None:
+        with lock:
+            if state.cancel_event.is_set() or state.status == "cancelled":
+                state.status = "cancelled"
+                return
+            state.status = "running"
+
+        def on_progress(ev: ProgressEvent) -> None:
+            with lock:
+                state.total_docs = ev.total_docs
+                state.completed_docs = ev.completed_docs
+                state.skipped_docs = ev.skipped_docs
+                state.failed_pages = ev.failed_pages
+                state.current_doc = ev.current_doc
+                state.current_page = ev.current_page
+                state.total_pages = ev.total_pages
+                state.elapsed_seconds = ev.elapsed_seconds
+                state.eta_seconds = ev.eta_seconds
+                state.status = ev.status
+
+        def on_client_ready(client: httpx.Client) -> None:
+            with lock:
+                state.active_client = client
+
+        try:
+            quiet_console = Console(file=io.StringIO(), quiet=True)
+            summary = run_pipeline(
+                tasks,
+                state.output_dir,
+                config,
+                ocr_fn=effective_ocr_fn,
+                console=quiet_console,
+                on_progress=on_progress,
+                cancel_event=state.cancel_event,
+                on_client_ready=on_client_ready,
+                work_dir=state.work_dir,
+            )
+            with lock:
+                state.active_client = None
+                state.completed_docs = summary.processed_docs + summary.skipped_docs
+                state.skipped_docs = summary.skipped_docs
+                state.failed_pages = summary.failed_pages
+                state.status = "cancelled" if summary.cancelled else "completed"
+        except Exception as exc:
+            with lock:
+                state.active_client = None
+                if state.cancel_event.is_set():
+                    state.status = "cancelled"
+                else:
+                    state.status = "failed"
+                    state.error = str(exc)
+        if on_job_finished is not None:
+            on_job_finished(state)
+
+    def _queue_worker() -> None:
+        while True:
+            state, tasks, config = job_queue.get()
+            try:
+                _execute_job(state, tasks, config)
+            finally:
+                job_queue.task_done()
+
+    # ponytail: single FIFO job queue prevents concurrent OCR runs from fighting for GPU VRAM
+    threading.Thread(target=_queue_worker, daemon=True).start()
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -283,6 +390,7 @@ def create_app(
         current.num_ctx = max(1024, min(int(current.num_ctx), 32768))
         if current.theme not in ("auto", "light", "dark"):
             current.theme = "auto"
+        current.desktop_notifications = normalize_notification_mode(current.desktop_notifications)
         if not current.archive_dir.strip():
             current.archive_dir = str(AppSettings().archive_dir)
         save_settings(current, settings_path)
@@ -570,6 +678,7 @@ def create_app(
         max_dim: int = Form(0),
         series_mode: bool = Form(False),
         force: bool = Form(False),
+        selected_paths: str = Form(""),
         files: list[UploadFile] = File(default=[]),
     ) -> dict:
         settings = get_settings()
@@ -589,12 +698,16 @@ def create_app(
             label = clean_name or input_path.name or str(input_path)
         else:
             valid_files = [f for f in files if f.filename]
-            if not valid_files:
-                raise HTTPException(status_code=400, detail="Please select at least one PDF or image.")
             input_path = job_dir / "input"
             output_dir = archive_base / rel_folder if rel_folder.parts else archive_base
-            _save_uploads(valid_files, input_path)
-            label = clean_name or (valid_files[0].filename if len(valid_files) == 1 else f"{len(valid_files)} uploaded files")
+            staged_names: list[str] = []
+            if selected_paths.strip():
+                staged_names.extend(_stage_local_files(selected_paths, input_path))
+            if valid_files:
+                staged_names.extend(_save_uploads(valid_files, input_path))
+            if not staged_names:
+                raise HTTPException(status_code=400, detail="Please select at least one PDF or image.")
+            label = clean_name or (staged_names[0] if len(staged_names) == 1 else f"{len(staged_names)} uploaded files")
 
         config = OcrConfig(
             model=model.strip() or settings.default_model,
@@ -658,61 +771,7 @@ def create_app(
         )
         with lock:
             jobs[job_id] = state
-
-        def on_progress(ev: ProgressEvent) -> None:
-            with lock:
-                state.total_docs = ev.total_docs
-                state.completed_docs = ev.completed_docs
-                state.skipped_docs = ev.skipped_docs
-                state.failed_pages = ev.failed_pages
-                state.current_doc = ev.current_doc
-                state.current_page = ev.current_page
-                state.total_pages = ev.total_pages
-                state.elapsed_seconds = ev.elapsed_seconds
-                state.eta_seconds = ev.eta_seconds
-                state.status = ev.status
-
-        def on_client_ready(client: httpx.Client) -> None:
-            with lock:
-                state.active_client = client
-
-        def worker() -> None:
-            with lock:
-                if state.cancel_event.is_set():
-                    state.status = "cancelled"
-                    return
-                state.status = "running"
-            try:
-                quiet_console = Console(file=io.StringIO(), quiet=True)
-                summary = run_pipeline(
-                    tasks,
-                    state.output_dir,
-                    config,
-                    ocr_fn=effective_ocr_fn,
-                    console=quiet_console,
-                    on_progress=on_progress,
-                    cancel_event=state.cancel_event,
-                    on_client_ready=on_client_ready,
-                    work_dir=state.work_dir,
-                )
-                with lock:
-                    state.active_client = None
-                    state.completed_docs = summary.processed_docs + summary.skipped_docs
-                    state.skipped_docs = summary.skipped_docs
-                    state.failed_pages = summary.failed_pages
-                    state.status = "cancelled" if summary.cancelled else "completed"
-            except Exception as exc:
-                with lock:
-                    state.active_client = None
-                    if state.cancel_event.is_set():
-                        state.status = "cancelled"
-                    else:
-                        state.status = "failed"
-                        state.error = str(exc)
-            if on_job_finished is not None:
-                on_job_finished(state)
-
-        threading.Thread(target=worker, daemon=True).start()
+        job_queue.put((state, tasks, config))
         return state.to_dict()
 
     @app.post("/api/jobs/{job_id}/cancel")
@@ -724,7 +783,7 @@ def create_app(
             if state.status in ("completed", "failed", "cancelled"):
                 return state.to_dict()
             state.cancel_event.set()
-            state.status = "cancelling"
+            state.status = "cancelled" if state.status == "waiting" else "cancelling"
             client = state.active_client
         if client is not None:
             try:

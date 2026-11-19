@@ -12,11 +12,7 @@ from platformdirs import user_data_dir
 import psutil
 
 
-def open_in_file_manager(path: Path) -> None:
-    """Open a file or directory in the native OS file manager."""
-    target = path.resolve()
-    if not target.exists():
-        target = target.parent
+def _open_with_os(target: Path) -> None:
     system = platform.system()
     if system == "Windows":
         os.startfile(str(target))  # type: ignore[attr-defined]
@@ -24,6 +20,31 @@ def open_in_file_manager(path: Path) -> None:
         subprocess.Popen(["open", str(target)])
     else:
         subprocess.Popen(["xdg-open", str(target)])
+
+
+def open_in_file_manager(path: Path) -> None:
+    """Open a file or directory in the native OS file manager."""
+    target = path.resolve()
+    if not target.exists():
+        target = target.parent
+    if target.is_file():
+        system = platform.system()
+        if system == "Windows":
+            subprocess.Popen(["explorer", "/select,", str(target)])
+        elif system == "Darwin":
+            subprocess.Popen(["open", "-R", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target.parent)])
+        return
+    _open_with_os(target)
+
+
+def open_with_default_app(path: Path) -> None:
+    """Open a file with the OS default application."""
+    target = path.resolve()
+    if not target.exists():
+        raise FileNotFoundError(f"Path not found: {target}")
+    _open_with_os(target)
 
 
 def generate_app_icon_image(size: int = 128) -> Image.Image:

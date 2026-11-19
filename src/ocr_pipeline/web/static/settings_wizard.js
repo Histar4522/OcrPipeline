@@ -56,7 +56,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     el("setTheme").value = s.theme || "auto";
     el("setSystemPrompt").value = s.system_prompt;
     el("setMinimizeTray").checked = Boolean(s.minimize_to_tray);
-    el("setDesktopNotify").checked = Boolean(s.desktop_notifications);
+    el("setDesktopNotify").value = s.desktop_notifications || "always";
     el("setObsidianMode").checked = Boolean(s.obsidian_mode);
 
     wizState.selectedModel = s.default_model || "glm-ocr";
@@ -65,7 +65,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     el("wizOllamaUrl").value = s.ollama_url;
     el("wizArchiveDir").value = s.archive_dir;
     el("wizTray").checked = Boolean(s.minimize_to_tray);
-    el("wizNotify").checked = Boolean(s.desktop_notifications);
+    el("wizNotify").value = s.desktop_notifications || "always";
     el("wizObsidian").checked = Boolean(s.obsidian_mode);
     syncPresetCards();
     return s;
@@ -225,13 +225,20 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
   }
 
   function renderSummaryStep() {
+    const notifyLabels = {
+      always: "Always",
+      not_in_focus: "Not in focus",
+      minimized: "Minimized to tray",
+      never: "Never",
+    };
+    const notifyVal = notifyLabels[el("wizNotify").value] || "Always";
     const items = [
       ["Ollama Server", `${el("wizOllamaUrl").value.trim()} (${wizState.ollamaOnline ? "Connected" : "Offline"})`],
       ["Default OCR Model", wizState.selectedModel],
       ["Quality Preset", `${wizState.dpi} DPI · ${wizState.maxDim} px max dimension`],
       ["Archive Directory", el("wizArchiveDir").value.trim()],
       ["Obsidian Vault Mode", el("wizObsidian").checked ? "Enabled (.obsidian + YAML frontmatter)" : "Disabled"],
-      ["Desktop Integration", `${el("wizTray").checked ? "Minimize to tray" : "Exit on close"} · ${el("wizNotify").checked ? "OS toasts on" : "OS toasts off"}`],
+      ["Desktop Integration", `${el("wizTray").checked ? "Minimize to tray" : "Exit on close"} · OS toasts: ${notifyVal}`],
     ];
     el("wizSummaryList").innerHTML = items
       .map(([k, v]) => `<li class="list-group-item d-flex justify-content-between"><span class="fw-semibold">${k}</span><span class="text-muted text-end">${v}</span></li>`)
@@ -320,7 +327,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
       max_image_dim: wizState.maxDim,
       archive_dir: el("wizArchiveDir").value.trim(),
       minimize_to_tray: el("wizTray").checked,
-      desktop_notifications: el("wizNotify").checked,
+      desktop_notifications: el("wizNotify").value,
       obsidian_mode: el("wizObsidian").checked,
     });
     closeWizard();
@@ -348,7 +355,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
       theme: el("setTheme").value,
       system_prompt: el("setSystemPrompt").value,
       minimize_to_tray: el("setMinimizeTray").checked,
-      desktop_notifications: el("setDesktopNotify").checked,
+      desktop_notifications: el("setDesktopNotify").value,
       obsidian_mode: el("setObsidianMode").checked,
     });
     el("settingsSaveMsg").textContent = "Saved!";

@@ -248,11 +248,23 @@ def start_ollama_service(base_url: str, wait_seconds: float = 20.0) -> dict:
         }
 
 
+_TIMING_KEYS = (
+    "total_duration",
+    "load_duration",
+    "prompt_eval_count",
+    "prompt_eval_duration",
+    "eval_count",
+    "eval_duration",
+    "done_reason",
+)
+
+
 def ocr_image_b64(
     image_b64: str,
     config: OcrConfig,
     client: httpx.Client | None = None,
     cancel_event: threading.Event | None = None,
+    metrics_out: dict[str, object] | None = None,
 ) -> str:
     """Send a base64-encoded image to Ollama /api/chat and return transcribed Markdown."""
     url = f"{config.ollama_url.rstrip('/')}/api/chat"
@@ -279,8 +291,13 @@ def ocr_image_b64(
             try:
                 resp = http.post(url, json=payload, timeout=config.timeout_seconds)
                 resp.raise_for_status()
-                content = resp.json().get("message", {}).get("content", "")
-                return content.strip()
+                data = resp.json()
+                if metrics_out is not None and isinstance(data, dict):
+                    for key in _TIMING_KEYS:
+                        if key in data:
+                            metrics_out[key] = data[key]
+                content = data.get("message", {}).get("content", "") if isinstance(data, dict) else ""
+                return str(content).strip()
             except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                 if cancel_event is not None and cancel_event.is_set():
                     raise JobCancelledError("Cancelled by user.") from exc
