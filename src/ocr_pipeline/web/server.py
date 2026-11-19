@@ -975,6 +975,8 @@ def create_app(
         except (ProviderError, ValueError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         if payload.get("apply", True):
+            if not tags:
+                raise HTTPException(status_code=502, detail="Assistant LLM returned no valid tags for this document.")
             tags = update_artifact_tags(target, tags)
         return {"ok": True, "tags": tags, "applied": bool(payload.get("apply", True))}
 

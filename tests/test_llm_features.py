@@ -76,6 +76,20 @@ def test_ai_rename_avoids_uuid_echo_and_retries(monkeypatch: object) -> None:
     assert uuid_name not in seen_prompts[0]
     assert suggested == "Race_and_Antiracist_Essay.md"
 
+    # Also retries if suggest_tags returns placeholder slugs like ["topic-one", "topic-two"]
+    tag_calls = 0
+
+    def fake_tag_retry(endpoint: ProviderEndpoint, sys: str, usr: str, **kw: object) -> str:
+        nonlocal tag_calls
+        tag_calls += 1
+        if tag_calls == 1:
+            return json.dumps({"tags": ["topic-one", "topic-two"]})
+        return json.dumps({"keywords": ["spanish grammar", "verb_conjugation"]})
+
+    monkeypatch.setattr("ocr_pipeline.llm_features.chat_text", fake_tag_retry)  # type: ignore[attr-defined]
+    assert suggest_tags("Spanish ser vs estar study guide.", [], ep) == ["spanish-grammar", "verb-conjugation"]
+    assert tag_calls == 2
+
 
 def test_analyze_and_folder_content_summary(tmp_path: Path, monkeypatch: object) -> None:
     archive = tmp_path / "archive"

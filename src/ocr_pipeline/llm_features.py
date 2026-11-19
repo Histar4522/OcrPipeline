@@ -288,13 +288,50 @@ def _prepare_doc_for_llm(
     )
 
 
+_PLACEHOLDER_TAG_SLUGS = {
+    "tag",
+    "tag1",
+    "tag2",
+    "slug1",
+    "slug2",
+    "topic-1",
+    "topic-2",
+    "topic-one",
+    "topic-two",
+    "example",
+    "example-tag",
+}
+
+
 def _is_unhelpful_filename(candidate: str, current_name: str) -> bool:
     stem = Path(candidate).stem.strip().lower()
-    if not stem or stem in ("descriptive_title", "descriptive_name", "document", "untitled", "title"):
+    if not stem or stem in (
+        "descriptive_title",
+        "descriptive_topic_title",
+        "descriptive_name",
+        "short_descriptive_title",
+        "short_title",
+        "topic_title",
+        "document",
+        "untitled",
+        "title",
+    ):
         return True
     if candidate.strip().lower() == current_name.strip().lower():
         return True
     return bool(_UUID_OR_HEX_RE.match(stem))
+
+
+def _clean_tag_candidates(raw_tags: object, max_tags: int) -> list[str]:
+    if isinstance(raw_tags, str):
+        items: list[object] = [p.strip() for p in raw_tags.split(",")]
+    elif isinstance(raw_tags, list):
+        items = raw_tags
+    else:
+        return []
+    formatted = [re.sub(r"[\s_]+", "-", str(t).strip().lower()).strip("-") for t in items]
+    filtered = [t for t in normalize_tags(formatted) if t and t not in _PLACEHOLDER_TAG_SLUGS]
+    return filtered[:max_tags]
 
 
 def suggest_tags(
@@ -311,20 +348,33 @@ def suggest_tags(
         text, endpoint, expected_output_tokens=256, system_info=system_info, client=client
     )
     system = (
-        "Extract concise lowercase hyphenated topic tags describing what THIS specific document is about. "
-        f'Output strictly valid JSON matching {{"tags": ["topic-one", "topic-two"]}} (2 to {max_tags} tags). '
-        "Base tags strictly on THIS document's subject matter. "
-        "Only reuse an optional archive tag if this document genuinely covers that exact subject."
-    )
+        "Extract 2 to {max_tags} concise lowercase hyphenated subject tags describing what THIS specific document is about. "
+        'Output strictly valid JSON matching {"tags": ["<subject-1>", "<subject-2>"]}. '
+        "Base tags strictly on THIS document's own topic; do NOT copy unrelated archive tags."
+    ).replace("{max_tags}", str(max_tags))
     user = f"Document:\n{doc_payload}"
     if known_tags:
-        user += f"\n\nOptional existing archive tags (use ONLY if accurately relevant to this document): {', '.join(known_tags[:30])}"
+        user += f"\n\nOptional archive tags (reuse ONLY if genuinely about the same topic): {', '.join(known_tags[:30])}"
     raw = chat_text(tuned_ep, system, user, json_mode=True, temperature=0.1, max_tokens=256, client=client)
     data = _parse_json_object(raw)
-    raw_tags = data.get("tags") or []
-    if isinstance(raw_tags, list):
-        raw_tags = [str(t).lower().replace(" ", "-") for t in raw_tags]
-    return normalize_tags(raw_tags)[:max_tags]
+    tags = _clean_tag_candidates(
+        data.get("tags") or data.get("keywords") or data.get("topics") or data.get("categories"),
+        max_tags,
+    )
+    if not tags:
+        retry_sys = (
+            f"List 2 to {max_tags} concise lowercase topic keywords for this document. "
+            'Output JSON: {"keywords": ["keyword-one", "keyword-two"]}.'
+        )
+        retry_raw = chat_text(
+            tuned_ep, retry_sys, f"Document:\n{doc_payload}", json_mode=True, temperature=0.25, max_tokens=160, client=client
+        )
+        try:
+            retry_data = _parse_json_object(retry_raw)
+            tags = _clean_tag_candidates(retry_data.get("keywords") or retry_data.get("tags"), max_tags)
+        except ValueError:
+            tags = _clean_tag_candidates(_strip_think_and_fences(retry_raw), max_tags)
+    return tags
 
 
 def suggest_filename(
@@ -340,9 +390,9 @@ def suggest_filename(
         text, endpoint, expected_output_tokens=160, system_info=system_info, client=client
     )
     system = (
-        "Generate a short, descriptive Markdown filename (.md) capturing the main topic of the document below. "
-        'Output strictly valid JSON matching {"filename": "Descriptive_Topic_Title.md"}. '
-        "Use 2 to 6 Title_Case words separated by underscores. Never output UUIDs or hex hashes."
+        "Generate a short, descriptive Markdown filename (.md) summarizing the actual subject of the document below. "
+        'Output strictly valid JSON matching {"filename": "<Subject_Words_Here>.md"}. '
+        "Replace placeholders with 2 to 6 Title_Case words from the text separated by underscores. Never output UUIDs."
     )
     user = f"Document:\n{doc_payload}"
     raw = chat_text(tuned_ep, system, user, json_mode=True, temperature=0.1, max_tokens=160, client=client)
@@ -359,8 +409,8 @@ def suggest_filename(
 
     if _is_unhelpful_filename(candidate, current_name):
         retry_sys = (
-            "Write a short 2 to 5 word topic title describing the text below. "
-            'Output strictly valid JSON matching {"title": "Short Descriptive Title"}.'
+            "Write a short 2 to 5 word topic title specifically naming the document content below. "
+            'Output strictly valid JSON matching {"title": "<Actual Topic Here>"}.'
         )
         retry_raw = chat_text(
             tuned_ep, retry_sys, f"Document:\n{doc_payload}", json_mode=True, temperature=0.3, max_tokens=120, client=client
@@ -421,11 +471,11 @@ def analyze_artifact_all(
     )
     system = (
         "Analyze this archived Markdown document and return strictly valid JSON matching:\n"
-        '{"tags": ["slug1", "slug2"], "filename": "Descriptive_Topic_Title.md", '
-        '"summary": "1-3 concise sentences."}.\n'
+        '{"tags": ["<subject-1>", "<subject-2>"], "filename": "<Subject_Words_Here>.md", '
+        '"summary": "<1-3 concise sentences>"}.\n'
         f"Tags: 2-{max_tags} concise lowercase hyphenated slugs matching THIS document's topic "
-        "(reuse an optional archive tag ONLY if truly relevant). "
-        "Filename: 2-6 Title_Case words with underscores ending in .md (never a UUID or random string)."
+        "(reuse an optional archive tag ONLY if genuinely about the same topic). "
+        "Filename: 2-6 Title_Case words from the text with underscores ending in .md (never a UUID or random string)."
     )
     user = f"Document:\n{doc_payload}"
     if known_tags:
@@ -433,13 +483,15 @@ def analyze_artifact_all(
     raw = chat_text(tuned_ep, system, user, json_mode=True, temperature=0.1, max_tokens=512, client=client)
     data = _parse_json_object(raw)
 
-    raw_tags = data.get("tags") or []
-    if isinstance(raw_tags, list):
-        raw_tags = [str(t).lower().replace(" ", "-") for t in raw_tags]
-    tags = normalize_tags(raw_tags)[:max_tags]
+    tags = _clean_tag_candidates(
+        data.get("tags") or data.get("keywords") or data.get("topics"),
+        max_tags,
+    )
 
     raw_fn = str(data.get("filename") or data.get("title") or "").strip()
     filename = sanitize_suggested_filename(raw_fn, fallback_name=current_name) if raw_fn else current_name
+    if _is_unhelpful_filename(filename, current_name):
+        filename = current_name
     summary = " ".join(str(data.get("summary") or "").strip().split())
     return {
         "tags": tags,
