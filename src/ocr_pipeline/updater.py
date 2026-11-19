@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 import httpx
 from platformdirs import user_data_dir
 
-from . import __version__
+from . import __version__, get_display_version
 from .platform_utils import open_in_file_manager
 
 GITHUB_REPO = "Histar4522/OcrPipeline"
@@ -131,6 +131,7 @@ def fetch_github_releases(
     return {
         "repo": repo,
         "current_version": current_version,
+        "display_version": get_display_version(),
         "latest": latest,
         "update_available": bool(latest and latest["is_newer"]),
         "releases": releases,

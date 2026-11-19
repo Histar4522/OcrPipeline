@@ -1,14 +1,23 @@
 """Tests for cross-platform installer asset generation and packaging."""
 
 from pathlib import Path
+import re
 import sys
 import tarfile
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "installer"))
 
-from build_installer import linux_desktop_entry, package_linux_archive  # noqa: E402
+from build_installer import linux_desktop_entry, package_linux_archive, resolve_installer_version  # noqa: E402
+from ocr_pipeline import __version__  # noqa: E402
 from prepare_assets import prepare_assets  # noqa: E402
+
+
+def test_build_version_formats() -> None:
+    beta_ver = resolve_installer_version(release=False)
+    rel_ver = resolve_installer_version(release=True)
+    assert rel_ver == __version__
+    assert re.match(rf"^{re.escape(__version__)}-dev-[0-9a-z]+-\d{{14}}$", beta_ver)
 
 
 def test_prepare_assets_creates_cross_platform_icons_and_rtf(tmp_path: Path) -> None:

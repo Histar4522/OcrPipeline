@@ -1,6 +1,7 @@
 """Cross-platform installer builder for OcrPipeline (Windows MSI, macOS DMG, Linux tarball)."""
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 import platform
 import shutil
@@ -10,11 +11,33 @@ import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
+BUILD_VERSION_FILE = ROOT / "src" / "ocr_pipeline" / "_build_version.py"
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "installer"))
 
 from ocr_pipeline import __version__  # noqa: E402
 from prepare_assets import prepare_assets  # noqa: E402
+
+
+def resolve_installer_version(release: bool = False) -> str:
+    """Return 'x.x.x' for --release builds, or 'x.x.x-dev-<commit>-<timestamp>' for local beta builds."""
+    if release:
+        return __version__
+    commit = "nogit"
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            commit = proc.stdout.strip()
+    except Exception:
+        pass
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    return f"{__version__}-dev-{commit}-{stamp}"
 
 
 def _run(cmd: list[str], cwd: Path = ROOT) -> None:
@@ -39,7 +62,7 @@ def build_pyinstaller_bundle() -> Path:
     return ROOT / "dist" / ("OcrPipeline.app" if sys.platform == "darwin" else "OcrPipeline")
 
 
-def package_windows_msi() -> Path:
+def package_windows_msi(version_label: str | None = None) -> Path:
     """Compile the Windows MSI installation wizard via WiX Toolset v6."""
     wix = _find_wix()
     ver_out = subprocess.check_output([wix, "--version"], text=True).strip()
@@ -50,7 +73,8 @@ def package_windows_msi() -> Path:
         _run([wix, "extension", "add", "-g", f"WixToolset.UI.wixext/{wix_ver}"])
 
     arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
-    msi_out = ROOT / "dist" / f"OcrPipeline-{__version__}-{arch}.msi"
+    label = version_label or __version__
+    msi_out = ROOT / "dist" / f"OcrPipeline-{label}-{arch}.msi"
     _run(
         [
             wix,
@@ -69,14 +93,15 @@ def package_windows_msi() -> Path:
     return msi_out
 
 
-def package_macos_dmg() -> Path:
+def package_macos_dmg(version_label: str | None = None) -> Path:
     """Package dist/OcrPipeline.app into a drag-to-Applications DMG on macOS."""
     app_bundle = ROOT / "dist" / "OcrPipeline.app"
     if not app_bundle.exists():
         raise FileNotFoundError(f"Missing macOS bundle: {app_bundle}")
 
     arch = platform.machine().lower()
-    dmg_out = ROOT / "dist" / f"OcrPipeline-{__version__}-macOS-{arch}.dmg"
+    label = version_label or __version__
+    dmg_out = ROOT / "dist" / f"OcrPipeline-{label}-macOS-{arch}.dmg"
     if dmg_out.exists():
         dmg_out.unlink()
 
@@ -117,7 +142,11 @@ def linux_desktop_entry(exec_path: str, icon_path: str) -> str:
     )
 
 
-def package_linux_archive(bundle_dir: Path | None = None, assets_dir: Path | None = None) -> Path:
+def package_linux_archive(
+    bundle_dir: Path | None = None,
+    assets_dir: Path | None = None,
+    version_label: str | None = None,
+) -> Path:
     """Package the Linux PyInstaller bundle with .desktop entry and install/uninstall scripts."""
     src_bundle = bundle_dir or (ROOT / "dist" / "OcrPipeline")
     src_assets = assets_dir or (ROOT / "installer" / "build_assets")
@@ -125,7 +154,8 @@ def package_linux_archive(bundle_dir: Path | None = None, assets_dir: Path | Non
         raise FileNotFoundError(f"Missing Linux bundle directory: {src_bundle}")
 
     arch = platform.machine().lower()
-    tar_out = src_bundle.parent / f"OcrPipeline-{__version__}-linux-{arch}.tar.gz"
+    label = version_label or __version__
+    tar_out = src_bundle.parent / f"OcrPipeline-{label}-linux-{arch}.tar.gz"
 
     install_sh = (
         "#!/usr/bin/env sh\n"
@@ -153,7 +183,7 @@ def package_linux_archive(bundle_dir: Path | None = None, assets_dir: Path | Non
     )
 
     with tempfile.TemporaryDirectory() as tmp:
-        stage = Path(tmp) / f"OcrPipeline-{__version__}-linux-{arch}"
+        stage = Path(tmp) / f"OcrPipeline-{label}-linux-{arch}"
         stage.mkdir()
         shutil.copytree(src_bundle, stage / "OcrPipeline", symlinks=True)
         shutil.copy2(src_assets / "app_icon.png", stage / "app_icon.png")
@@ -175,27 +205,38 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build OcrPipeline desktop bundle and OS installer.")
     parser.add_argument("--bundle-only", action="store_true", help="Only build PyInstaller bundle.")
     parser.add_argument("--skip-pyinstaller", action="store_true", help="Package an existing dist/ bundle.")
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help="Use clean release version x.x.x instead of local beta tag x.x.x-dev-<commit>-<timestamp>.",
+    )
     args = parser.parse_args(argv)
 
     assets = prepare_assets()
     print(f"Prepared installer assets in {assets}")
 
-    if not args.skip_pyinstaller:
-        build_pyinstaller_bundle()
+    version_label = resolve_installer_version(release=args.release)
+    print(f"Build version label: {version_label}")
+    BUILD_VERSION_FILE.write_text(f'BUILD_VERSION = "{version_label}"\n', encoding="utf-8")
+    try:
+        if not args.skip_pyinstaller:
+            build_pyinstaller_bundle()
 
-    if args.bundle_only:
-        print("Bundle build finished.")
+        if args.bundle_only:
+            print("Bundle build finished.")
+            return 0
+
+        if sys.platform == "win32":
+            artifact = package_windows_msi(version_label=version_label)
+        elif sys.platform == "darwin":
+            artifact = package_macos_dmg(version_label=version_label)
+        else:
+            artifact = package_linux_archive(assets_dir=assets, version_label=version_label)
+
+        print(f"Installer ready: {artifact}")
         return 0
-
-    if sys.platform == "win32":
-        artifact = package_windows_msi()
-    elif sys.platform == "darwin":
-        artifact = package_macos_dmg()
-    else:
-        artifact = package_linux_archive(assets_dir=assets)
-
-    print(f"Installer ready: {artifact}")
-    return 0
+    finally:
+        BUILD_VERSION_FILE.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

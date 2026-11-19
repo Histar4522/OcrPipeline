@@ -22,7 +22,7 @@ import httpx
 from rich.console import Console
 
 from . import __name__ as _pkg  # noqa: F401
-from .. import __version__
+from .. import __version__, get_display_version
 from ..artifacts import (
     delete_folder,
     ensure_obsidian_vault,
@@ -241,7 +241,7 @@ def create_app(
     on_job_finished: Callable[[JobState], None] | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI Desktop & Web UI application."""
-    app = FastAPI(title="OcrPipeline", version=__version__)
+    app = FastAPI(title="OcrPipeline", version=get_display_version())
     root = (jobs_root or default_jobs_dir()).resolve()
     root.mkdir(parents=True, exist_ok=True)
     jobs: dict[str, JobState] = {}
@@ -371,7 +371,8 @@ def create_app(
         cfg = get_settings()
         return {
             "status": "ok",
-            "version": __version__,
+            "version": get_display_version(),
+            "base_version": __version__,
             "license": "MIT OR Apache-2.0",
             "copyright": "Copyright (c) 2026 Weien Xu",
             "platform": platform.system(),

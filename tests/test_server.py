@@ -97,7 +97,8 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["setup_completed"] is False
-    assert health.json()["version"] == __version__
+    assert health.json()["base_version"] == __version__
+    assert health.json()["version"].startswith(f"{__version__}-devrun-")
     assert health.json()["license"] == "MIT OR Apache-2.0"
     assert "Weien Xu" in health.json()["copyright"]
 

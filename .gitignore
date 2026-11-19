@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 dist/
 build/
+src/ocr_pipeline/_build_version.py
 
 # Local runtime & OCR artifacts
 ocr_jobs/

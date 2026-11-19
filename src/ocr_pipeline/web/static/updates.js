@@ -56,7 +56,8 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
 
   function renderResult(data) {
     updState.data = data;
-    el("updateCurrentVersion").textContent = `v${data.current_version}`;
+    const shownVer = data.display_version || data.current_version;
+    el("updateCurrentVersion").textContent = `v${shownVer}`;
     el("updateLastChecked").textContent = data.checked_at ? `Last checked: ${data.checked_at}` : "";
 
     const badge = el("updateStatusBadge");
@@ -181,7 +182,7 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
       if (data.update_available && data.latest && silent) {
         showToast("Update Available", `${data.latest.tag_name} is available in Settings → Update.`, "info");
       } else if (!data.update_available && !silent) {
-        showToast("Up to Date", `OcrPipeline v${data.current_version} is the latest release.`, "success");
+        showToast("Up to Date", `OcrPipeline v${data.display_version || data.current_version} is the latest release.`, "success");
       }
     } catch (err) {
       setUpdateButtonState({ enabled: false, label: "Update" });
