@@ -56,6 +56,12 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
         "releaseHistorySelect",
         "newReleaseNotes",
         "releaseHistoryPreview",
+        "jobProviderSelect",
+        "jobAiOptionsBox",
+        "artifactAiBtn",
+        "aiOrganizeFolderBtn",
+        "roleVisionProvider",
+        "roleLlmEnabled",
     ):
         assert f'id="{elem_id}"' in home.text
     for val in ("always", "not_in_focus", "minimized", "never"):
@@ -82,6 +88,7 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
         "/static/dialogs.js",
         "/static/tag_input.js",
         "/static/updates.js",
+        "/static/providers_ui.js",
     ):
         js = client.get(asset)
         assert js.status_code == 200
@@ -605,3 +612,179 @@ def test_updater_version_asset_selection_and_endpoints(tmp_path: Path, monkeypat
     assert launched and launched[0][0] == "msiexec"
     assert (tmp_path / "dl" / "OcrPipeline-0.3.0-x64.msi").read_bytes() == b"fake-msi-bytes"
     assert callable(srv.fetch_github_releases)
+
+
+def test_providers_endpoints_and_ai_artifact_gating(tmp_path: Path, monkeypatch: object) -> None:
+    import json
+    from ocr_pipeline import llm_features
+
+    client = _make_test_app(tmp_path)
+    prov_res = client.get("/api/providers")
+    assert prov_res.status_code == 200
+    prov_ids = {r["id"] for r in prov_res.json()["registry"]}
+    assert {"ollama", "llama_cpp", "openai", "anthropic", "google", "deepseek", "xai", "qwen", "custom"}.issubset(prov_ids)
+
+    archive_dir = tmp_path / "archive"
+    (archive_dir / "Math").mkdir(parents=True)
+    note = archive_dir / "note.md"
+    note.write_text("# Linear Algebra\nEigenvalues and eigenvectors", encoding="utf-8")
+
+    # Disabled LLM must reject all AI endpoints with 400
+    for ep in ("/api/artifacts/ai/tags", "/api/artifacts/ai/rename", "/api/artifacts/ai/organize", "/api/artifacts/ai/summarize", "/api/artifacts/ai/cleanup"):
+        assert client.post(ep, json={"path": "note.md"}).status_code == 400
+    assert client.post("/api/artifacts/ai/batch-plan", json={"cwd": ""}).status_code == 400
+
+    # Enable optional Assistant LLM
+    upd = client.put(
+        "/api/settings",
+        json={"llm_enabled": True, "llm_provider": "ollama", "llm_model": "qwen3:1.7b"},
+    )
+    assert upd.status_code == 200
+    assert upd.json()["llm_available"] is True
+
+    def fake_chat(endpoint, sys_prompt, user_prompt, **kw):
+        if kw.get("json_mode"):
+            if "filename" in sys_prompt and "folder" in sys_prompt:
+                return json.dumps(
+                    {
+                        "tags": ["linear-algebra", "math"],
+                        "filename": "Linear_Algebra_Notes.md",
+                        "folder": "Math",
+                        "summary": "Introduces eigenvalues.",
+                        "reason": "Math note",
+                    }
+                )
+            if '"tags"' in sys_prompt:
+                return json.dumps({"tags": ["linear-algebra", "math"]})
+            if '"filename"' in sys_prompt:
+                return json.dumps({"filename": "Linear_Algebra_Notes.md"})
+            if '"folder"' in sys_prompt:
+                return json.dumps({"folder": "Math", "reason": "Math note"})
+            if '"summary"' in sys_prompt:
+                return json.dumps({"summary": "Covers eigenvalues cleanly."})
+        return "# Linear Algebra\nClean eigenvalues and eigenvectors."
+
+    monkeypatch.setattr(llm_features, "chat_text", fake_chat)  # type: ignore[attr-defined]
+
+    tags_res = client.post("/api/artifacts/ai/tags", json={"path": "note.md"})
+    assert tags_res.status_code == 200
+    assert tags_res.json()["tags"] == ["linear-algebra", "math"]
+
+    ren_res = client.post("/api/artifacts/ai/rename", json={"path": "note.md"})
+    assert ren_res.status_code == 200
+    assert ren_res.json()["suggested_name"] == "Linear_Algebra_Notes.md"
+
+    org_res = client.post("/api/artifacts/ai/organize", json={"path": "note.md"})
+    assert org_res.status_code == 200
+    assert org_res.json()["folder"] == "Math"
+
+    sum_res = client.post("/api/artifacts/ai/summarize", json={"path": "note.md"})
+    assert sum_res.status_code == 200
+    assert sum_res.json()["summary"] == "Covers eigenvalues cleanly."
+
+    clean_res = client.post("/api/artifacts/ai/cleanup", json={"path": "note.md"})
+    assert clean_res.status_code == 200
+    assert "Clean eigenvalues" in clean_res.json()["cleaned_markdown"]
+
+    save_res = client.put("/api/artifacts/content", json={"path": "note.md", "content": clean_res.json()["cleaned_markdown"]})
+    assert save_res.status_code == 200
+
+    plan_res = client.post("/api/artifacts/ai/batch-plan", json={"cwd": ""})
+    assert plan_res.status_code == 200
+    assert plan_res.json()["plan"][0]["suggested_folder"] == "Math"
+
+    apply_res = client.post(
+        "/api/artifacts/ai/batch-apply",
+        json={
+            "items": [
+                {
+                    "path": "note.md",
+                    "target_folder": "Math",
+                    "new_name": "Linear_Algebra_Notes.md",
+                    "tags": ["linear-algebra", "math"],
+                    "apply_tags": True,
+                    "apply_move": True,
+                }
+            ]
+        },
+    )
+    assert apply_res.status_code == 200
+    assert apply_res.json()["applied"] == 1
+    assert (archive_dir / "Math" / "Linear_Algebra_Notes.md").is_file()
+
+
+def test_post_ocr_llm_automation_and_nonfatal_error(tmp_path: Path, monkeypatch: object) -> None:
+    import ocr_pipeline.web.server as srv
+
+    archive_dir = tmp_path / "archive"
+    (archive_dir / "Biology").mkdir(parents=True)
+
+    def fake_ocr(image_b64: str, cfg: OcrConfig, client: object) -> str:
+        return "# Cellular Respiration\nATP synthesis inside mitochondria."
+
+    client = _make_test_app(tmp_path, ocr_fn=fake_ocr)
+    client.put(
+        "/api/settings",
+        json={"llm_enabled": True, "llm_provider": "ollama", "llm_model": "qwen3:1.7b"},
+    )
+
+    monkeypatch.setattr(
+        srv,
+        "analyze_artifact_all",
+        lambda *a, **kw: {
+            "tags": ["biology", "atp"],
+            "filename": "Cellular_Respiration.md",
+            "folder": "Biology",
+            "summary": "Explains ATP synthesis in mitochondria.",
+            "reason": "Biology subject",
+        },
+    )  # type: ignore[attr-defined]
+
+    resp = client.post(
+        "/api/jobs",
+        data={
+            "source_mode": "upload",
+            "auto_tag": "true",
+            "auto_summarize": "true",
+            "auto_rename": "true",
+            "auto_organize": "true",
+        },
+        files=[("files", ("scan.png", _png_bytes(), "image/png"))],
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    deadline = time.time() + 5.0
+    job_data = resp.json()
+    while job_data["status"] not in ("completed", "failed") and time.time() < deadline:
+        time.sleep(0.05)
+        job_data = client.get(f"/api/jobs/{job_id}").json()
+
+    assert job_data["status"] == "completed"
+    moved_file = archive_dir / "Biology" / "Cellular_Respiration.md"
+    assert moved_file.is_file()
+    content = moved_file.read_text(encoding="utf-8")
+    assert "biology" in content
+    assert "Explains ATP synthesis" in content
+    assert job_data["files"] == ["Biology/Cellular_Respiration.md"]
+    assert client.get(f"/api/jobs/{job_id}/files/Biology/Cellular_Respiration.md").status_code == 200
+    assert client.get(f"/api/jobs/{job_id}/download-all").status_code == 200
+
+    # Ensure an LLM exception does not fail the OCR job itself
+    def failing_llm(*a: object, **kw: object) -> dict:
+        raise RuntimeError("LLM timed out")
+
+    monkeypatch.setattr(srv, "analyze_artifact_all", failing_llm)  # type: ignore[attr-defined]
+    resp2 = client.post(
+        "/api/jobs",
+        data={"source_mode": "upload", "auto_tag": "true"},
+        files=[("files", ("scan2.png", _png_bytes(), "image/png"))],
+    )
+    job2 = resp2.json()["job_id"]
+    deadline = time.time() + 5.0
+    j2 = resp2.json()
+    while j2["status"] not in ("completed", "failed") and time.time() < deadline:
+        time.sleep(0.05)
+        j2 = client.get(f"/api/jobs/{job2}").json()
+    assert j2["status"] == "completed"
+    assert "LLM WARN" in client.get(f"/api/jobs/{job2}/log").text

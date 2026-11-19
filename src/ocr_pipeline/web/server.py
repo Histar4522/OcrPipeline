@@ -30,24 +30,52 @@ from ..artifacts import (
     rename_folder,
     sanitize_rel_folder,
     scan_artifacts,
+    update_artifact_summary,
     update_artifact_tags,
 )
 from ..config import DEFAULT_SYSTEM_PROMPT, OcrConfig
 from ..discovery import IMAGE_EXTENSIONS, PDF_EXTENSION, DocumentTask, discover_documents
+from ..llm_features import (
+    analyze_artifact_all,
+    cleanup_ocr_markdown,
+    plan_folder_organization,
+    suggest_filename,
+    suggest_folder,
+    suggest_tags,
+    summarize_document,
+)
 from ..ollama_client import (
     OllamaError,
+    ProviderError,
     check_ollama_ready,
     delete_model,
     find_ollama_executable,
     list_models_detailed,
-    ocr_image_b64,
     pull_model,
     pull_model_stream,
     start_ollama_service,
 )
 from ..platform_utils import generate_app_icon_image, get_system_info, open_in_file_manager
+from ..providers import (
+    check_endpoint_ready,
+    list_providers_metadata,
+    test_provider_connection,
+    vision_ocr_with_config,
+)
 from ..runner import OcrFn, ProgressEvent, run_pipeline
-from ..settings import AppSettings, default_jobs_dir, load_settings, normalize_notification_mode, save_settings
+from ..settings import (
+    AppSettings,
+    apply_provider_updates,
+    default_jobs_dir,
+    effective_api_key,
+    effective_base_url,
+    load_settings,
+    mask_settings_for_api,
+    normalize_notification_mode,
+    resolve_llm_endpoint,
+    resolve_vision_endpoint,
+    save_settings,
+)
 from ..updater import UpdateError, download_and_install_update, fetch_github_releases
 
 # Ensure .js/.css serve valid MIME types even on Windows where registry maps .js to text/plain
@@ -110,6 +138,7 @@ class JobState:
     work_dir: Path
     model: str
     dpi: int
+    provider: str = "ollama"
     status: str = "waiting"
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     total_docs: int = 0
@@ -124,20 +153,36 @@ class JobState:
     folder: str = ""
     tags: list[str] = field(default_factory=list)
     expected_files: list[Path] = field(default_factory=list, repr=False)
+    archive_root: Path | None = field(default=None, repr=False)
+    post_llm: dict[str, object] = field(default_factory=dict, repr=False)
     error: str = ""
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     active_client: httpx.Client | None = field(default=None, repr=False)
 
+    def _rel_path(self, p: Path) -> str:
+        if p.is_relative_to(self.output_dir):
+            return p.relative_to(self.output_dir).as_posix()
+        if self.archive_root is not None and p.is_relative_to(self.archive_root):
+            return p.relative_to(self.archive_root).as_posix()
+        return p.name
+
+    def resolve_output_file(self, file_path: str) -> Path | None:
+        roots = [self.output_dir]
+        if self.archive_root is not None:
+            roots.append(self.archive_root)
+        for base in roots:
+            cand = (base / file_path).resolve()
+            if cand.is_relative_to(base) and cand.is_file():
+                return cand
+        return None
+
     def to_dict(self) -> dict:
-        files = sorted(
-            p.relative_to(self.output_dir).as_posix()
-            for p in self.expected_files
-            if p.is_file()
-        )
+        files = sorted(self._rel_path(p) for p in self.expected_files if p.is_file())
         return {
             "job_id": self.job_id,
             "label": self.label,
             "output_dir": str(self.output_dir),
+            "provider": self.provider,
             "model": self.model,
             "dpi": self.dpi,
             "status": self.status,
@@ -269,13 +314,85 @@ def create_app(
         "message": "",
         "path": "",
     }
-    effective_ocr_fn: OcrFn = ocr_fn or ocr_image_b64
+    effective_ocr_fn: OcrFn = ocr_fn or vision_ocr_with_config
 
     def get_settings() -> AppSettings:
         cfg = load_settings(settings_path)
         if ollama_url:
             cfg.ollama_url = ollama_url
+            cfg.providers["ollama"]["base_url"] = ollama_url
         return cfg
+
+    def _append_job_log(state: JobState, line: str) -> None:
+        log_path = state.work_dir / "ocr_pipeline.log"
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S,000")
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{stamp} [INFO] {line}\n")
+
+    def _apply_post_ocr_llm(state: JobState, cfg: AppSettings) -> None:
+        llm_endpoint = resolve_llm_endpoint(cfg)
+        opts = state.post_llm
+        do_tag = bool(opts.get("auto_tag"))
+        do_rename = bool(opts.get("auto_rename"))
+        do_organize = bool(opts.get("auto_organize"))
+        do_summarize = bool(opts.get("auto_summarize"))
+        if llm_endpoint is None or not (do_tag or do_rename or do_organize or do_summarize):
+            return
+
+        archive_base = (state.archive_root or state.output_dir).resolve()
+        index = scan_artifacts(archive_base)
+        known_tags = [str(t["name"]) for t in (index.get("tags") or [])]
+        existing_folders = list(index.get("folders") or [])
+        multi_doc = len(state.expected_files) != 1
+
+        for idx, md_path in enumerate(list(state.expected_files)):
+            if state.cancel_event.is_set() or not md_path.is_file():
+                continue
+            try:
+                raw_text = md_path.read_text(encoding="utf-8", errors="replace")
+                res = analyze_artifact_all(
+                    raw_text,
+                    current_name=md_path.name,
+                    known_tags=known_tags,
+                    existing_folders=existing_folders,
+                    endpoint=llm_endpoint,
+                    allow_new_folders=cfg.auto_organize_allow_new_folders,
+                )
+                if do_tag and res["tags"]:
+                    merged_tags = normalize_tags(list(state.tags) + list(res["tags"]))
+                    update_artifact_tags(md_path, merged_tags)
+                    for t in merged_tags:
+                        if t not in known_tags:
+                            known_tags.append(t)
+                if do_summarize and res["summary"]:
+                    update_artifact_summary(md_path, res["summary"])
+
+                dst_dir = md_path.parent
+                if do_organize and not opts.get("explicit_folder") and res["folder"]:
+                    cand_dir = (archive_base / sanitize_rel_folder(res["folder"])).resolve()
+                    if cand_dir.is_relative_to(archive_base):
+                        dst_dir = cand_dir
+                        if res["folder"] not in existing_folders:
+                            existing_folders.append(res["folder"])
+
+                dst_name = md_path.name
+                if do_rename and (multi_doc or not opts.get("explicit_name")) and res["filename"]:
+                    dst_name = res["filename"]
+
+                final_path = md_path
+                if dst_dir != md_path.parent or dst_name != md_path.name:
+                    dst_dir.mkdir(parents=True, exist_ok=True)
+                    final_path = _unique_output_path(dst_dir / dst_name)
+                    md_path.rename(final_path)
+                    with lock:
+                        state.expected_files[idx] = final_path.resolve()
+
+                _append_job_log(
+                    state,
+                    f"LLM POST ({llm_endpoint.provider_id}/{llm_endpoint.model}): {md_path.name} -> {state._rel_path(final_path)} tags={res['tags']}",
+                )
+            except Exception as exc:
+                _append_job_log(state, f"LLM WARN ({md_path.name}): {exc}")
 
     def _execute_job(state: JobState, tasks: list[DocumentTask], config: OcrConfig) -> None:
         with lock:
@@ -314,6 +431,8 @@ def create_app(
                 on_client_ready=on_client_ready,
                 work_dir=state.work_dir,
             )
+            if not summary.cancelled and summary.processed_docs > 0:
+                _apply_post_ocr_llm(state, get_settings())
             with lock:
                 state.active_client = None
                 state.completed_docs = summary.processed_docs + summary.skipped_docs
@@ -386,7 +505,7 @@ def create_app(
     @app.get("/api/settings")
     def read_settings() -> dict:
         cfg = get_settings()
-        data = cfg.to_dict()
+        data = mask_settings_for_api(cfg)
         data["default_system_prompt"] = DEFAULT_SYSTEM_PROMPT
         return data
 
@@ -395,10 +514,16 @@ def create_app(
         current = get_settings()
         if payload.get("reset_prompt"):
             payload["system_prompt"] = DEFAULT_SYSTEM_PROMPT
+        if "providers" in payload:
+            apply_provider_updates(current, payload["providers"])
         allowed = current.to_dict()
         for key in allowed:
-            if key in payload:
+            if key in payload and key != "providers":
                 setattr(current, key, payload[key])
+        if "ollama_url" in payload and "providers" not in payload:
+            current.providers["ollama"]["base_url"] = str(payload["ollama_url"]).strip()
+        if "default_model" in payload and "vision_model" not in payload:
+            current.vision_model = str(payload["default_model"]).strip() or current.vision_model
         current.dpi = max(72, min(int(current.dpi), 600))
         current.max_image_dim = max(512, min(int(current.max_image_dim), 4096))
         current.num_ctx = max(1024, min(int(current.num_ctx), 32768))
@@ -406,12 +531,56 @@ def create_app(
             current.theme = "auto"
         current.desktop_notifications = normalize_notification_mode(current.desktop_notifications)
         current.auto_check_updates = bool(current.auto_check_updates)
+        current.llm_enabled = bool(current.llm_enabled)
+        current.auto_tag_on_ocr = bool(current.auto_tag_on_ocr)
+        current.auto_rename_on_ocr = bool(current.auto_rename_on_ocr)
+        current.auto_organize_on_ocr = bool(current.auto_organize_on_ocr)
+        current.auto_organize_allow_new_folders = bool(current.auto_organize_allow_new_folders)
+        current.auto_summarize_on_ocr = bool(current.auto_summarize_on_ocr)
+        if not current.vision_model.strip():
+            current.vision_model = "glm-ocr"
+        current.default_model = current.vision_model
         if not current.archive_dir.strip():
             current.archive_dir = str(AppSettings().archive_dir)
         save_settings(current, settings_path)
-        data = current.to_dict()
+        data = mask_settings_for_api(current)
         data["default_system_prompt"] = DEFAULT_SYSTEM_PROMPT
         return data
+
+    @app.get("/api/providers")
+    def get_providers() -> dict:
+        cfg = get_settings()
+        masked = mask_settings_for_api(cfg)
+        vision_ep = resolve_vision_endpoint(cfg)
+        llm_ep = resolve_llm_endpoint(cfg)
+        return {
+            "registry": list_providers_metadata(),
+            "providers": masked["providers"],
+            "vision": {
+                "provider": vision_ep.provider_id,
+                "model": vision_ep.model,
+            },
+            "llm": {
+                "enabled": bool(cfg.llm_enabled),
+                "available": llm_ep is not None,
+                "provider": cfg.llm_provider,
+                "model": cfg.llm_model,
+            },
+        }
+
+    @app.post("/api/providers/test")
+    def probe_provider(payload: dict = Body(...)) -> dict:
+        cfg = get_settings()
+        pid = str(payload.get("provider", "ollama")).strip().lower()
+        base_url = str(payload.get("base_url") or effective_base_url(cfg, pid)).strip()
+        raw_key = str(payload.get("api_key") or "").strip()
+        if raw_key == "••••••••":
+            raw_key = ""
+        api_key = raw_key or effective_api_key(cfg, pid)
+        try:
+            return test_provider_connection(pid, base_url=base_url, api_key=api_key)
+        except ProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/updates/check")
     def check_for_updates() -> dict:
@@ -739,6 +908,175 @@ def create_app(
         open_in_file_manager(target)
         return {"ok": True}
 
+    def _require_llm() -> tuple[AppSettings, object]:
+        cfg = get_settings()
+        endpoint = resolve_llm_endpoint(cfg)
+        if endpoint is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Optional Assistant LLM is not configured. Enable and select an LLM in Models & Providers.",
+            )
+        return cfg, endpoint
+
+    @app.put("/api/artifacts/content")
+    def save_artifact_content(payload: dict = Body(...)) -> dict:
+        cfg = get_settings()
+        rel = str(payload.get("path", "")).strip()
+        if not rel:
+            raise HTTPException(status_code=400, detail="path is required.")
+        target = _resolve_artifact_path(Path(cfg.archive_dir), rel)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+        content = str(payload.get("content", ""))
+        target.write_text(content, encoding="utf-8")
+        return {"ok": True, "path": rel}
+
+    @app.post("/api/artifacts/ai/tags")
+    def ai_artifact_tags(payload: dict = Body(...)) -> dict:
+        cfg, endpoint = _require_llm()
+        rel = str(payload.get("path", "")).strip()
+        target = _resolve_artifact_path(Path(cfg.archive_dir), rel)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+        index = scan_artifacts(Path(cfg.archive_dir))
+        known_tags = [str(t["name"]) for t in (index.get("tags") or [])]
+        raw_text = target.read_text(encoding="utf-8", errors="replace")
+        try:
+            tags = suggest_tags(raw_text, known_tags, endpoint)  # type: ignore[arg-type]
+        except (ProviderError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if payload.get("apply", True):
+            tags = update_artifact_tags(target, tags)
+        return {"ok": True, "tags": tags, "applied": bool(payload.get("apply", True))}
+
+    @app.post("/api/artifacts/ai/rename")
+    def ai_artifact_rename(payload: dict = Body(...)) -> dict:
+        cfg, endpoint = _require_llm()
+        rel = str(payload.get("path", "")).strip()
+        target = _resolve_artifact_path(Path(cfg.archive_dir), rel)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+        raw_text = target.read_text(encoding="utf-8", errors="replace")
+        try:
+            suggested = suggest_filename(raw_text, target.name, endpoint)  # type: ignore[arg-type]
+        except (ProviderError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"ok": True, "suggested_name": suggested}
+
+    @app.post("/api/artifacts/ai/organize")
+    def ai_artifact_organize(payload: dict = Body(...)) -> dict:
+        cfg, endpoint = _require_llm()
+        archive_dir = Path(cfg.archive_dir)
+        rel = str(payload.get("path", "")).strip()
+        target = _resolve_artifact_path(archive_dir, rel)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+        index = scan_artifacts(archive_dir)
+        existing_folders = list(index.get("folders") or [])
+        raw_text = target.read_text(encoding="utf-8", errors="replace")
+        allow_new = bool(payload.get("allow_new_folders", cfg.auto_organize_allow_new_folders))
+        try:
+            res = suggest_folder(
+                raw_text,
+                existing_folders,
+                [],
+                endpoint,  # type: ignore[arg-type]
+                allow_new_folders=allow_new,
+            )
+        except (ProviderError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"ok": True, **res}
+
+    @app.post("/api/artifacts/ai/summarize")
+    def ai_artifact_summarize(payload: dict = Body(...)) -> dict:
+        cfg, endpoint = _require_llm()
+        rel = str(payload.get("path", "")).strip()
+        target = _resolve_artifact_path(Path(cfg.archive_dir), rel)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+        raw_text = target.read_text(encoding="utf-8", errors="replace")
+        try:
+            summary = summarize_document(raw_text, endpoint)  # type: ignore[arg-type]
+        except (ProviderError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        saved = update_artifact_summary(target, summary)
+        return {"ok": True, "summary": saved}
+
+    @app.post("/api/artifacts/ai/cleanup")
+    def ai_artifact_cleanup(payload: dict = Body(...)) -> dict:
+        cfg, endpoint = _require_llm()
+        rel = str(payload.get("path", "")).strip()
+        target = _resolve_artifact_path(Path(cfg.archive_dir), rel)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+        raw_text = target.read_text(encoding="utf-8", errors="replace")
+        try:
+            cleaned = cleanup_ocr_markdown(raw_text, endpoint)  # type: ignore[arg-type]
+        except (ProviderError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"ok": True, "original": raw_text, "cleaned_markdown": cleaned}
+
+    @app.post("/api/artifacts/ai/batch-plan")
+    def ai_batch_organize_plan(payload: dict = Body(default={})) -> dict:
+        cfg, endpoint = _require_llm()
+        cwd = sanitize_rel_folder(str(payload.get("cwd", ""))).as_posix()
+        if cwd == ".":
+            cwd = ""
+        allow_new = bool(payload.get("allow_new_folders", cfg.auto_organize_allow_new_folders))
+        try:
+            plan = plan_folder_organization(
+                Path(cfg.archive_dir),
+                cwd,
+                endpoint,  # type: ignore[arg-type]
+                allow_new_folders=allow_new,
+            )
+        except (ProviderError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"ok": True, "plan": plan}
+
+    @app.post("/api/artifacts/ai/batch-apply")
+    def ai_batch_organize_apply(payload: dict = Body(...)) -> dict:
+        cfg = get_settings()
+        archive_dir = Path(cfg.archive_dir).expanduser().resolve()
+        items = payload.get("items") or []
+        if not isinstance(items, list):
+            raise HTTPException(status_code=400, detail="items list is required.")
+
+        applied = 0
+        errors: list[str] = []
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            rel = str(entry.get("path", "")).strip()
+            if not rel:
+                continue
+            try:
+                src = _resolve_artifact_path(archive_dir, rel)
+                if not src.is_file():
+                    continue
+                if entry.get("apply_tags") and isinstance(entry.get("tags"), (list, str)):
+                    update_artifact_tags(src, normalize_tags(entry["tags"]))
+                if entry.get("summary"):
+                    update_artifact_summary(src, str(entry["summary"]))
+                if entry.get("apply_move", True):
+                    raw_name = str(entry.get("new_name", "")).strip() or src.name
+                    if "/" in raw_name or "\\" in raw_name or ".." in raw_name:
+                        raise ValueError(f"Invalid filename: {raw_name}")
+                    if not raw_name.lower().endswith(".md"):
+                        raw_name += ".md"
+                    rel_folder = sanitize_rel_folder(str(entry.get("target_folder") or ""))
+                    dst_dir = (archive_dir / rel_folder).resolve()
+                    if not dst_dir.is_relative_to(archive_dir):
+                        raise ValueError("Invalid target folder.")
+                    if dst_dir != src.parent or raw_name != src.name:
+                        dst_dir.mkdir(parents=True, exist_ok=True)
+                        dst = _unique_output_path((dst_dir / raw_name).resolve())
+                        src.rename(dst)
+                applied += 1
+            except Exception as exc:
+                errors.append(f"{rel}: {exc}")
+        return {"ok": True, "applied": applied, "errors": errors}
+
     @app.get("/api/jobs")
     def list_jobs() -> list[dict]:
         with lock:
@@ -753,11 +1091,16 @@ def create_app(
         job_name: str = Form(""),
         folder: str = Form(""),
         tags: str = Form(""),
+        provider: str = Form(""),
         model: str = Form(""),
         dpi: int = Form(0),
         max_dim: int = Form(0),
         series_mode: bool = Form(False),
         force: bool = Form(False),
+        auto_tag: bool | None = Form(None),
+        auto_rename: bool | None = Form(None),
+        auto_organize: bool | None = Form(None),
+        auto_summarize: bool | None = Form(None),
         selected_paths: str = Form(""),
         files: list[UploadFile] = File(default=[]),
     ) -> dict:
@@ -789,9 +1132,17 @@ def create_app(
                 raise HTTPException(status_code=400, detail="Please select at least one PDF or image.")
             label = clean_name or (staged_names[0] if len(staged_names) == 1 else f"{len(staged_names)} uploaded files")
 
+        vision_ep = resolve_vision_endpoint(
+            settings,
+            provider_id=provider.strip() or None,
+            model=model.strip() or None,
+        )
         config = OcrConfig(
-            model=model.strip() or settings.default_model,
-            ollama_url=settings.ollama_url,
+            model=vision_ep.model,
+            provider=vision_ep.provider_id,
+            base_url=vision_ep.base_url,
+            api_key=vision_ep.api_key,
+            ollama_url=vision_ep.base_url if vision_ep.provider_id == "ollama" else settings.ollama_url,
             dpi=max(72, min(dpi or settings.dpi, 600)),
             max_image_dim=max(512, min(max_dim or settings.max_image_dim, 4096)),
             num_ctx=settings.num_ctx,
@@ -832,21 +1183,33 @@ def create_app(
 
         if ocr_fn is None:
             try:
-                check_ollama_ready(config.ollama_url, config.model)
-            except OllamaError as exc:
+                check_endpoint_ready(vision_ep, require_vision=True)
+            except ProviderError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        post_llm = {
+            "auto_tag": settings.auto_tag_on_ocr if auto_tag is None else auto_tag,
+            "auto_rename": settings.auto_rename_on_ocr if auto_rename is None else auto_rename,
+            "auto_organize": settings.auto_organize_on_ocr if auto_organize is None else auto_organize,
+            "auto_summarize": settings.auto_summarize_on_ocr if auto_summarize is None else auto_summarize,
+            "explicit_name": bool(clean_name),
+            "explicit_folder": bool(rel_folder.parts),
+        }
 
         state = JobState(
             job_id=job_id,
             label=label,
             input_dir=input_path,
             output_dir=output_dir.resolve(),
+            archive_root=archive_base.resolve() if source_mode == "upload" else None,
             work_dir=job_dir.resolve(),
+            provider=config.provider,
             model=config.model,
             dpi=config.dpi,
             folder=rel_folder.as_posix() if rel_folder.parts else "",
             tags=parsed_tags,
             expected_files=[t.output_path.resolve() for t in tasks],
+            post_llm=post_llm,
             total_docs=len(tasks),
         )
         with lock:
@@ -898,8 +1261,8 @@ def create_app(
             state = jobs.get(job_id)
         if state is None:
             raise HTTPException(status_code=404, detail="Job not found.")
-        target = (state.output_dir / file_path).resolve()
-        if not target.is_relative_to(state.output_dir) or not target.is_file():
+        target = state.resolve_output_file(file_path)
+        if target is None:
             raise HTTPException(status_code=404, detail="Output file not found.")
         if download:
             return FileResponse(target, filename=target.name, media_type="text/markdown")
@@ -915,7 +1278,7 @@ def create_app(
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for md_file in sorted(state.expected_files):
                 if md_file.is_file():
-                    zf.write(md_file, arcname=md_file.relative_to(state.output_dir).as_posix())
+                    zf.write(md_file, arcname=state._rel_path(md_file))
         buf.seek(0)
         return StreamingResponse(
             buf,

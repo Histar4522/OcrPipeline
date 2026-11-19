@@ -9,6 +9,7 @@ import {
   fetchJobLog,
   fetchJobs,
   fetchModels,
+  fetchProviders,
   fetchSettings,
   fileDownloadUrl,
   pullModel,
@@ -19,7 +20,7 @@ import {
 import { initArtifactsView } from "./artifacts.js";
 import { bsPrompt, triggerDownload } from "./dialogs.js";
 import { renderMarkdownContent } from "./markdown.js";
-import { initModelsView } from "./models.js";
+import { initProvidersAndModelsView } from "./providers_ui.js";
 import { initSettingsAndWizard } from "./settings_wizard.js";
 import { createTagInput } from "./tag_input.js";
 import { initUpdatesView } from "./updates.js";
@@ -27,6 +28,11 @@ import { initUpdatesView } from "./updates.js";
 const state = {
   selectedFiles: [],
   pulledModels: [],
+  providerRegistry: [],
+  providerConfigs: {},
+  ollamaOnline: false,
+  ollamaInstalled: false,
+  lastSettings: null,
   sourceMode: "upload",
   activeJobId: null,
   activeFile: null,
@@ -75,12 +81,13 @@ function showToast(title, body, variant = "primary") {
 }
 
 function updatePullButton() {
-  const selected = el("modelSelect").value;
+  const pid = el("jobProviderSelect").value || "ollama";
+  const selected = el("modelSelect").value.trim();
   const pulled = state.pulledModels.includes(selected) || state.pulledModels.includes(`${selected}:latest`);
-  el("pullModelBtn").classList.toggle("d-none", !selected || pulled);
+  el("pullModelBtn").classList.toggle("d-none", pid !== "ollama" || !selected || pulled);
 }
 
-function setNewJobAvailability({ status, installed = false }) {
+function setNewJobAvailability({ status, installed = false, message = "" }) {
   const fieldset = el("newJobFieldset");
   const banner = el("ollamaLockBanner");
   const msg = el("ollamaLockMsg");
@@ -98,61 +105,128 @@ function setNewJobAvailability({ status, installed = false }) {
   banner.classList.remove("d-none");
   if (status === "connecting") {
     banner.className = "alert alert-secondary py-2 px-3 small d-flex justify-content-between align-items-center gap-2 mb-3";
-    msg.textContent = "Connecting to Ollama...";
+    msg.textContent = message || "Checking provider...";
     quickStart.classList.add("d-none");
   } else {
     banner.className = "alert alert-warning py-2 px-3 small d-flex justify-content-between align-items-center gap-2 mb-3";
-    msg.textContent = installed
-      ? "Ollama is installed but offline. Start Ollama to run OCR jobs."
-      : "Ollama is unavailable. Open Settings -> Setup Wizard to configure Ollama.";
+    msg.textContent =
+      message ||
+      (installed
+        ? "Ollama is installed but offline. Start Ollama or switch Vision provider."
+        : "Vision provider needs configuration in Providers & Models.");
     quickStart.classList.toggle("d-none", !installed);
   }
+}
+
+function refreshJobProviderState() {
+  const pid = el("jobProviderSelect").value || "ollama";
+  const spec = state.providerRegistry.find((r) => r.id === pid);
+  const cfg = state.providerConfigs[pid] || {};
+  const badge = el("ollamaBadge");
+
+  if (pid === "ollama") {
+    if (state.ollamaOnline) {
+      badge.className = "badge text-bg-success";
+      badge.textContent = `Ollama (${state.pulledModels.length})`;
+      setNewJobAvailability({ status: "online" });
+    } else {
+      badge.className = "badge text-bg-danger";
+      badge.textContent = "Ollama Offline";
+      setNewJobAvailability({ status: "offline", installed: state.ollamaInstalled });
+    }
+  } else if (spec?.requires_api_key && !cfg.has_key) {
+    badge.className = "badge text-bg-warning text-dark";
+    badge.textContent = `${spec.label} (No Key)`;
+    setNewJobAvailability({
+      status: "offline",
+      installed: false,
+      message: `${spec.label} API key missing. Configure in Providers & Models or set ${spec.env_var}.`,
+    });
+  } else if (pid === "custom" && !cfg.base_url) {
+    badge.className = "badge text-bg-warning text-dark";
+    badge.textContent = "Custom (No URL)";
+    setNewJobAvailability({
+      status: "offline",
+      installed: false,
+      message: "Custom Base URL missing. Configure in Providers & Models.",
+    });
+  } else {
+    badge.className = "badge text-bg-success";
+    badge.textContent = spec ? spec.label : pid;
+    setNewJobAvailability({ status: "online" });
+  }
+
+  const dl = el("jobModelDatalist");
+  const suggested = spec?.suggested_vision_models || [];
+  const options =
+    pid === "ollama"
+      ? [...new Set([state.lastSettings?.vision_model, ...suggested, ...state.pulledModels].filter(Boolean))]
+      : [...new Set([state.lastSettings?.vision_model, ...suggested].filter(Boolean))];
+  dl.innerHTML = "";
+  for (const m of options) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    dl.appendChild(opt);
+  }
+  if (!el("modelSelect").value.trim() && options.length) {
+    el("modelSelect").value = options[0];
+  }
+  updatePullButton();
 }
 
 async function syncSettingsToJobForm() {
   const badge = el("ollamaBadge");
   badge.className = "badge text-bg-secondary";
-  badge.textContent = "Connecting Ollama...";
+  badge.textContent = "Checking provider...";
   setNewJobAvailability({ status: "connecting" });
 
+  let provData;
   let modelsData;
   let settings;
   try {
-    [modelsData, settings] = await Promise.all([fetchModels(), fetchSettings()]);
+    [provData, modelsData, settings] = await Promise.all([fetchProviders(), fetchModels(), fetchSettings()]);
   } catch {
     badge.className = "badge text-bg-danger";
-    badge.textContent = "Ollama Offline";
+    badge.textContent = "Provider Offline";
     setNewJobAvailability({ status: "offline", installed: false });
     return;
   }
 
-  const models = modelsData.models || [];
-  state.pulledModels = models;
+  state.providerRegistry = provData.registry || [];
+  state.providerConfigs = provData.providers || {};
+  state.pulledModels = modelsData.models || [];
+  state.ollamaOnline = Boolean(modelsData.online);
+  state.ollamaInstalled = Boolean(modelsData.installed);
+  state.lastSettings = settings;
 
-  if (modelsData.online) {
-    badge.className = "badge text-bg-success";
-    badge.textContent = `Ollama Online (${models.length})`;
-    setNewJobAvailability({ status: "online" });
-  } else {
-    badge.className = "badge text-bg-danger";
-    badge.textContent = "Ollama Offline";
-    setNewJobAvailability({ status: "offline", installed: Boolean(modelsData.installed) });
+  const provSel = el("jobProviderSelect");
+  provSel.innerHTML = "";
+  for (const spec of state.providerRegistry) {
+    if (spec.supports_vision) provSel.add(new Option(spec.label, spec.id));
   }
-
-  const defaults = ["glm-ocr", "deepseek-ocr", "qwen3-vl:4b", "qwen3-vl:8b"];
-  const options = [...new Set([settings.default_model, ...defaults, ...models].filter(Boolean))];
-  const select = el("modelSelect");
-  select.innerHTML = options
-    .map((m) => {
-      const ok = models.includes(m) || models.includes(`${m}:latest`);
-      return `<option value="${m}">${m}${ok ? "" : " (not pulled)"}</option>`;
-    })
-    .join("");
-  select.value = settings.default_model;
+  provSel.value = settings.vision_provider || "ollama";
+  el("modelSelect").value = settings.vision_model || settings.default_model || "glm-ocr";
   el("dpiInput").value = settings.dpi;
   el("maxDimInput").value = settings.max_image_dim;
   applyTheme(settings.theme || "auto");
-  updatePullButton();
+
+  const llmOn = Boolean(settings.llm_available);
+  const llmBadge = el("llmStatusBadge");
+  llmBadge.classList.toggle("d-none", !llmOn);
+  if (llmOn) llmBadge.textContent = `LLM: ${settings.llm_model}`;
+
+  el("jobAiStatusHint").textContent = llmOn ? `${settings.llm_provider} / ${settings.llm_model}` : "Optional LLM not configured";
+  for (const [id, val] of [
+    ["jobAutoTag", settings.auto_tag_on_ocr],
+    ["jobAutoSummarize", settings.auto_summarize_on_ocr],
+    ["jobAutoRename", settings.auto_rename_on_ocr],
+    ["jobAutoOrganize", settings.auto_organize_on_ocr],
+  ]) {
+    el(id).disabled = !llmOn;
+    el(id).checked = llmOn && Boolean(val);
+  }
+  artifactsView.setLlmAvailable(llmOn);
+  refreshJobProviderState();
 }
 
 function formatBytes(bytes) {
@@ -477,7 +551,7 @@ async function syncJobArchiveOptions(selectFolder = null) {
 
 const artifactsView = initArtifactsView({ showToast, onArchiveChanged: () => syncJobArchiveOptions() });
 const jobTagEditor = createTagInput(el("jobTagsContainer"), { placeholder: "Add tag and press Enter..." });
-const modelsView = initModelsView({ showToast, onModelsChanged: syncSettingsToJobForm });
+const modelsView = initProvidersAndModelsView({ showToast, onProvidersChanged: syncSettingsToJobForm });
 const settingsWizard = initSettingsAndWizard({
   showToast,
   onSettingsSaved: syncSettingsToJobForm,
@@ -529,6 +603,15 @@ el("quickStartOllamaBtn").addEventListener("click", async () => {
   }
 });
 
+el("jobProviderSelect").addEventListener("change", () => {
+  const pid = el("jobProviderSelect").value;
+  const spec = state.providerRegistry.find((r) => r.id === pid);
+  if (spec?.suggested_vision_models?.length) {
+    el("modelSelect").value = spec.suggested_vision_models[0];
+  }
+  refreshJobProviderState();
+});
+el("modelSelect").addEventListener("input", updatePullButton);
 el("modelSelect").addEventListener("change", updatePullButton);
 el("pullModelBtn").addEventListener("click", async () => {
   const btn = el("pullModelBtn");
@@ -657,11 +740,18 @@ el("jobForm").addEventListener("submit", async (e) => {
   fd.append("job_name", el("jobNameInput").value);
   fd.append("folder", el("jobFolderSelect").value);
   fd.append("tags", jobTagEditor.getTags().join(","));
+  fd.append("provider", el("jobProviderSelect").value);
   fd.append("model", el("modelSelect").value);
   fd.append("dpi", el("dpiInput").value);
   fd.append("max_dim", el("maxDimInput").value);
   fd.append("series_mode", String(el("seriesSwitch").checked));
   fd.append("force", String(el("forceSwitch").checked));
+  if (!el("jobAutoTag").disabled) {
+    fd.append("auto_tag", String(el("jobAutoTag").checked));
+    fd.append("auto_summarize", String(el("jobAutoSummarize").checked));
+    fd.append("auto_rename", String(el("jobAutoRename").checked));
+    fd.append("auto_organize", String(el("jobAutoOrganize").checked));
+  }
   if (state.sourceMode === "upload") {
     const nativeEntries = [];
     for (const item of state.selectedFiles) {

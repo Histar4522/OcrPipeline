@@ -1,6 +1,7 @@
 import {
   fetchModelPullStatus,
   fetchModels,
+  fetchProviders,
   fetchSettings,
   fetchSystemInfo,
   openExternalUrl,
@@ -8,14 +9,15 @@ import {
   saveSettings,
   startModelPull,
   startOllama,
+  testProvider,
 } from "./api.js";
 
 const el = (id) => document.getElementById(id);
 
 const STEP_TITLES = [
   "Step 1 of 5 · Welcome & System Check",
-  "Step 2 of 5 · Local Ollama Engine",
-  "Step 3 of 5 · Choose & Download OCR Model",
+  "Step 2 of 5 · Vision OCR Provider",
+  "Step 3 of 5 · Vision Model & Optional LLM",
   "Step 4 of 5 · Archive, Presets & Desktop Behavior",
   "Step 5 of 5 · Review & Finish",
 ];
@@ -23,11 +25,16 @@ const STEP_TITLES = [
 export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFinished }) {
   const wizState = {
     step: 1,
+    visionProvider: "ollama",
     selectedModel: "glm-ocr",
+    llmEnabled: false,
+    llmProvider: "ollama",
+    llmModel: "qwen3:1.7b",
     dpi: 220,
     maxDim: 1536,
-    ollamaOnline: false,
+    providerOnline: false,
     modelsData: null,
+    providersData: null,
     pullTimer: null,
   };
 
@@ -45,10 +52,45 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     }
   }
 
+  function specFor(pid) {
+    return (wizState.providersData?.registry || []).find((r) => r.id === pid) || null;
+  }
+
+  function syncWizardLlmFields() {
+    const on = el("wizLlmEnabled").checked;
+    wizState.llmEnabled = on;
+    el("wizLlmFields").classList.toggle("opacity-50", !on);
+    el("wizLlmProvider").disabled = !on;
+    el("wizLlmModel").disabled = !on;
+  }
+
+  function syncWizardProviderUi() {
+    const pid = el("wizVisionProvider").value || "ollama";
+    wizState.visionProvider = pid;
+    const spec = specFor(pid);
+    const saved = wizState.providersData?.providers?.[pid] || {};
+    el("wizOllamaUrl").value = saved.base_url || spec?.default_base_url || "";
+    el("wizApiKey").value = saved.api_key || "";
+    el("wizApiKeyRow").classList.toggle("d-none", !spec?.requires_api_key && pid !== "custom");
+    if (pid !== "ollama") {
+      el("wizStartOllamaBtn").classList.add("d-none");
+      el("wizInstallGuide").classList.add("d-none");
+    }
+    const dl = el("wizVisionModelDatalist");
+    dl.innerHTML = "";
+    for (const m of spec?.suggested_vision_models || []) {
+      const opt = document.createElement("option");
+      opt.value = m;
+      dl.appendChild(opt);
+    }
+  }
+
   async function loadSettingsForm() {
-    const s = await fetchSettings();
+    const [s, provData] = await Promise.all([fetchSettings(), fetchProviders()]);
+    wizState.providersData = provData;
+
     el("setOllamaUrl").value = s.ollama_url;
-    el("setDefaultModel").value = s.default_model;
+    el("setDefaultModel").value = s.vision_model || s.default_model;
     el("setArchiveDir").value = s.archive_dir;
     el("setDpi").value = s.dpi;
     el("setMaxDim").value = s.max_image_dim;
@@ -59,10 +101,30 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     el("setDesktopNotify").value = s.desktop_notifications || "always";
     el("setObsidianMode").checked = Boolean(s.obsidian_mode);
 
-    wizState.selectedModel = s.default_model || "glm-ocr";
+    wizState.visionProvider = s.vision_provider || "ollama";
+    wizState.selectedModel = s.vision_model || s.default_model || "glm-ocr";
+    wizState.llmEnabled = Boolean(s.llm_enabled);
+    wizState.llmProvider = s.llm_provider || "ollama";
+    wizState.llmModel = s.llm_model || "qwen3:1.7b";
     wizState.dpi = s.dpi || 220;
     wizState.maxDim = s.max_image_dim || 1536;
-    el("wizOllamaUrl").value = s.ollama_url;
+
+    const vSel = el("wizVisionProvider");
+    const lSel = el("wizLlmProvider");
+    vSel.innerHTML = "";
+    lSel.innerHTML = "";
+    for (const spec of provData.registry || []) {
+      if (spec.supports_vision) vSel.add(new Option(spec.label, spec.id));
+      if (spec.supports_llm) lSel.add(new Option(spec.label, spec.id));
+    }
+    vSel.value = wizState.visionProvider;
+    lSel.value = wizState.llmProvider;
+    el("wizVisionModel").value = wizState.selectedModel;
+    el("wizLlmEnabled").checked = wizState.llmEnabled;
+    el("wizLlmModel").value = wizState.llmModel;
+    syncWizardProviderUi();
+    syncWizardLlmFields();
+
     el("wizArchiveDir").value = s.archive_dir;
     el("wizTray").checked = Boolean(s.minimize_to_tray);
     el("wizNotify").value = s.desktop_notifications || "always";
@@ -92,10 +154,34 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     }
   }
 
-  async function refreshOllamaStep(autoLaunch = false) {
+  async function refreshProviderStep(autoLaunch = false) {
+    const pid = el("wizVisionProvider").value || "ollama";
     const alertBox = el("wizOllamaAlert");
     const startBtn = el("wizStartOllamaBtn");
     const installGuide = el("wizInstallGuide");
+
+    if (pid !== "ollama") {
+      startBtn.classList.add("d-none");
+      installGuide.classList.add("d-none");
+      const res = await testProvider({
+        provider: pid,
+        base_url: el("wizOllamaUrl").value.trim(),
+        api_key: el("wizApiKey").value.trim(),
+      });
+      wizState.providerOnline = Boolean(res.online);
+      alertBox.className = `alert small mb-3 ${res.online ? "alert-success" : "alert-warning"}`;
+      alertBox.textContent = res.message;
+      const dl = el("wizVisionModelDatalist");
+      const spec = specFor(pid);
+      dl.innerHTML = "";
+      for (const m of [...new Set([...(res.models || []), ...(spec?.suggested_vision_models || [])])]) {
+        const opt = document.createElement("option");
+        opt.value = m;
+        dl.appendChild(opt);
+      }
+      renderModelCards();
+      return;
+    }
 
     let data = await fetchModels();
     if (!data.online && data.installed && autoLaunch) {
@@ -112,7 +198,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     }
 
     wizState.modelsData = data;
-    wizState.ollamaOnline = Boolean(data.online);
+    wizState.providerOnline = Boolean(data.online);
 
     if (data.online) {
       alertBox.className = "alert alert-success small mb-3";
@@ -121,12 +207,12 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
       installGuide.classList.add("d-none");
     } else if (data.installed) {
       alertBox.className = "alert alert-warning small mb-3";
-      alertBox.textContent = `Ollama is installed, but not responding at ${data.ollama_url}. Click Start Ollama or verify the URL.`;
+      alertBox.textContent = `Ollama is installed, but not responding at ${data.ollama_url}. Click Start Ollama or switch provider above.`;
       startBtn.classList.remove("d-none");
       installGuide.classList.add("d-none");
     } else {
-      alertBox.className = "alert alert-danger small mb-3";
-      alertBox.textContent = `Ollama is not running at ${data.ollama_url} and was not found in PATH.`;
+      alertBox.className = "alert alert-warning small mb-3";
+      alertBox.textContent = `Ollama was not found at ${data.ollama_url}. Install Ollama below or choose another Vision provider (llama.cpp / OpenAI / Anthropic / Google).`;
       startBtn.classList.add("d-none");
       installGuide.classList.remove("d-none");
     }
@@ -134,12 +220,36 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
   }
 
   function renderModelCards() {
-    const data = wizState.modelsData;
+    const pid = wizState.visionProvider;
     const container = el("wizModelCards");
+    container.innerHTML = "";
+    el("wizVisionModel").value = wizState.selectedModel;
+
+    if (pid !== "ollama") {
+      const spec = specFor(pid);
+      for (const name of spec?.suggested_vision_models || []) {
+        const isSelected = wizState.selectedModel === name;
+        const col = document.createElement("div");
+        col.className = "col-md-6";
+        col.innerHTML = `
+          <div class="border rounded p-2 wizard-choice-card ${isSelected ? "selected" : ""} d-flex justify-content-between align-items-center">
+            <span class="fw-semibold small"></span>
+            <button type="button" class="btn btn-xs ${isSelected ? "btn-primary" : "btn-outline-primary"}">${isSelected ? "Selected" : "Select"}</button>
+          </div>`;
+        col.querySelector("span").textContent = name;
+        col.querySelector("button").addEventListener("click", () => {
+          wizState.selectedModel = name;
+          el("wizVisionModel").value = name;
+          renderModelCards();
+        });
+        container.appendChild(col);
+      }
+      return;
+    }
+
+    const data = wizState.modelsData;
     if (!data) return;
     const installed = new Set(data.models || []);
-    container.innerHTML = "";
-
     for (const rec of data.recommended || []) {
       const isPulled = installed.has(rec.name) || installed.has(`${rec.name}:latest`);
       const isSelected = wizState.selectedModel === rec.name || wizState.selectedModel === `${rec.name}:latest`;
@@ -166,6 +276,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
 
       col.querySelector(".select-btn").addEventListener("click", () => {
         wizState.selectedModel = rec.name;
+        el("wizVisionModel").value = rec.name;
         renderModelCards();
       });
       const pullBtn = col.querySelector(".pull-btn");
@@ -213,7 +324,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
           } else {
             bar.className = "progress-bar bg-success";
             wizState.selectedModel = modelName;
-            await refreshOllamaStep(false);
+            await refreshProviderStep(false);
             await onSettingsSaved();
             showToast("Model Ready", `${modelName} installed.`, "success");
           }
@@ -232,9 +343,13 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
       never: "Never",
     };
     const notifyVal = notifyLabels[el("wizNotify").value] || "Always";
+    const llmSummary = el("wizLlmEnabled").checked
+      ? `${el("wizLlmProvider").value} / ${el("wizLlmModel").value.trim()}`
+      : "Disabled (Vision OCR only)";
     const items = [
-      ["Ollama Server", `${el("wizOllamaUrl").value.trim()} (${wizState.ollamaOnline ? "Connected" : "Offline"})`],
-      ["Default OCR Model", wizState.selectedModel],
+      ["Vision Provider", `${el("wizVisionProvider").value} (${el("wizOllamaUrl").value.trim()})`],
+      ["Vision OCR Model", el("wizVisionModel").value.trim() || wizState.selectedModel],
+      ["Assistant LLM", llmSummary],
       ["Quality Preset", `${wizState.dpi} DPI · ${wizState.maxDim} px max dimension`],
       ["Archive Directory", el("wizArchiveDir").value.trim()],
       ["Obsidian Vault Mode", el("wizObsidian").checked ? "Enabled (.obsidian + YAML frontmatter)" : "Disabled"],
@@ -261,8 +376,8 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     el("wizNextBtn").classList.toggle("d-none", wizState.step === 5);
     el("wizFinishBtn").classList.toggle("d-none", wizState.step !== 5);
 
-    if (wizState.step === 2) refreshOllamaStep(true);
-    if (wizState.step === 3 && !wizState.modelsData) refreshOllamaStep(false);
+    if (wizState.step === 2) refreshProviderStep(el("wizVisionProvider").value === "ollama");
+    if (wizState.step === 3) renderModelCards();
     if (wizState.step === 5) renderSummaryStep();
   }
 
@@ -270,7 +385,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     toggleWizardShell(true);
     goToStep(1);
     await Promise.all([loadSettingsForm(), loadSystemStep()]);
-    await refreshOllamaStep(true);
+    await refreshProviderStep(el("wizVisionProvider").value === "ollama");
   }
 
   function closeWizard() {
@@ -286,9 +401,32 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     btn.addEventListener("click", () => goToStep(Number(btn.dataset.wizStep)));
   });
 
+  el("wizVisionProvider").addEventListener("change", () => {
+    syncWizardProviderUi();
+    const spec = specFor(el("wizVisionProvider").value);
+    if (spec?.suggested_vision_models?.length) {
+      wizState.selectedModel = spec.suggested_vision_models[0];
+      el("wizVisionModel").value = wizState.selectedModel;
+    }
+    refreshProviderStep(false);
+  });
+  el("wizVisionModel").addEventListener("input", (e) => {
+    wizState.selectedModel = e.target.value.trim();
+  });
+  el("wizLlmEnabled").addEventListener("change", syncWizardLlmFields);
+
   el("wizRecheckBtn").addEventListener("click", async () => {
-    await saveSettings({ ollama_url: el("wizOllamaUrl").value.trim() });
-    await refreshOllamaStep(false);
+    const pid = el("wizVisionProvider").value || "ollama";
+    await saveSettings({
+      vision_provider: pid,
+      providers: {
+        [pid]: {
+          base_url: el("wizOllamaUrl").value.trim(),
+          api_key: el("wizApiKey").value.trim(),
+        },
+      },
+    });
+    await refreshProviderStep(false);
     await onSettingsSaved();
   });
 
@@ -303,7 +441,7 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     } finally {
       btn.disabled = false;
       btn.textContent = "Start Ollama";
-      await refreshOllamaStep(false);
+      await refreshProviderStep(false);
     }
   });
 
@@ -319,10 +457,21 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
   });
 
   el("wizFinishBtn").addEventListener("click", async () => {
+    const pid = el("wizVisionProvider").value || "ollama";
+    const vModel = el("wizVisionModel").value.trim() || wizState.selectedModel || "glm-ocr";
     await saveSettings({
       setup_completed: true,
-      ollama_url: el("wizOllamaUrl").value.trim(),
-      default_model: wizState.selectedModel,
+      vision_provider: pid,
+      vision_model: vModel,
+      providers: {
+        [pid]: {
+          base_url: el("wizOllamaUrl").value.trim(),
+          api_key: el("wizApiKey").value.trim(),
+        },
+      },
+      llm_enabled: el("wizLlmEnabled").checked,
+      llm_provider: el("wizLlmProvider").value || "ollama",
+      llm_model: el("wizLlmModel").value.trim(),
       dpi: wizState.dpi,
       max_image_dim: wizState.maxDim,
       archive_dir: el("wizArchiveDir").value.trim(),

@@ -29,7 +29,7 @@
         </li>
         <li class="nav-item">
           <button class="nav-link" data-view="modelsView" type="button">
-            <i class="bi bi-cpu me-1"></i>Models
+            <i class="bi bi-cpu me-1"></i>Providers &amp; Models
           </button>
         </li>
         <li class="nav-item">
@@ -40,7 +40,8 @@
       </ul>
       <div class="d-flex align-items-center gap-2">
         <button id="navUpdateBtn" class="btn btn-xs btn-warning text-dark fw-semibold d-none" type="button" title="View available update"></button>
-        <span id="ollamaBadge" class="badge text-bg-secondary">Checking Ollama...</span>
+        <span id="llmStatusBadge" class="badge text-bg-secondary d-none" title="Optional Assistant LLM"></span>
+        <span id="ollamaBadge" class="badge text-bg-secondary">Checking provider...</span>
         <div class="dropdown">
           <button id="themeDropdownBtn" class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" title="Theme">
             <i id="themeIcon" class="bi bi-circle-half me-1"></i><span id="themeLabel">Auto</span>
@@ -141,10 +142,15 @@
                     <label class="form-label small fw-semibold">Tags</label>
                     <div id="jobTagsContainer"></div>
                   </div>
-                  <div class="col-12">
-                    <label class="form-label small fw-semibold">Ollama OCR / Vision Model</label>
+                  <div class="col-5">
+                    <label class="form-label small fw-semibold" for="jobProviderSelect">Vision Provider</label>
+                    <select id="jobProviderSelect" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="col-7">
+                    <label class="form-label small fw-semibold" for="modelSelect">Vision / OCR Model</label>
                     <div class="input-group input-group-sm">
-                      <select id="modelSelect" class="form-select form-select-sm"></select>
+                      <input id="modelSelect" list="jobModelDatalist" type="text" class="form-control form-control-sm" required />
+                      <datalist id="jobModelDatalist"></datalist>
                       <button id="pullModelBtn" class="btn btn-outline-secondary d-none" type="button">
                         <i class="bi bi-download me-1"></i>Pull
                       </button>
@@ -160,7 +166,7 @@
                   </div>
                 </div>
 
-                <div class="d-flex gap-3 mb-3">
+                <div class="d-flex gap-3 mb-2">
                   <div class="form-check form-switch">
                     <input id="seriesSwitch" class="form-check-input" type="checkbox" />
                     <label class="form-check-label small" for="seriesSwitch">Combine images into 1 doc</label>
@@ -168,6 +174,31 @@
                   <div class="form-check form-switch">
                     <input id="forceSwitch" class="form-check-input" type="checkbox" />
                     <label class="form-check-label small" for="forceSwitch">Force reprocess</label>
+                  </div>
+                </div>
+
+                <div id="jobAiOptionsBox" class="border rounded p-2 mb-3 bg-body-tertiary small">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="fw-semibold"><i class="bi bi-stars text-primary me-1"></i>AI Post-Processing</span>
+                    <span id="jobAiStatusHint" class="text-muted">Optional LLM not configured</span>
+                  </div>
+                  <div class="d-flex flex-wrap gap-3">
+                    <div class="form-check form-check-inline mb-0 me-0">
+                      <input id="jobAutoTag" class="form-check-input" type="checkbox" disabled />
+                      <label class="form-check-label" for="jobAutoTag">Auto-tag</label>
+                    </div>
+                    <div class="form-check form-check-inline mb-0 me-0">
+                      <input id="jobAutoSummarize" class="form-check-input" type="checkbox" disabled />
+                      <label class="form-check-label" for="jobAutoSummarize">Auto-summarize</label>
+                    </div>
+                    <div class="form-check form-check-inline mb-0 me-0">
+                      <input id="jobAutoRename" class="form-check-input" type="checkbox" disabled />
+                      <label class="form-check-label" for="jobAutoRename">Auto-rename</label>
+                    </div>
+                    <div class="form-check form-check-inline mb-0 me-0">
+                      <input id="jobAutoOrganize" class="form-check-input" type="checkbox" disabled />
+                      <label class="form-check-label" for="jobAutoOrganize">Auto-organize</label>
+                    </div>
                   </div>
                 </div>
 
@@ -313,6 +344,9 @@
             </nav>
             <div class="d-flex gap-2">
               <button id="clearFiltersBtn" class="btn btn-xs btn-outline-secondary d-none" type="button">Clear Filters</button>
+              <button id="aiOrganizeFolderBtn" class="btn btn-xs btn-outline-primary text-nowrap" type="button" disabled title="Configure an optional Assistant LLM in Providers & Models">
+                <i class="bi bi-stars me-1"></i>AI Organize
+              </button>
               <button id="newFolderBtn" class="btn btn-xs btn-outline-primary text-nowrap" type="button">
                 <i class="bi bi-folder-plus me-1"></i>New Folder
               </button>
@@ -327,13 +361,27 @@
                 <div>
                   <span id="artifactSelectedPath" class="small fw-semibold text-muted">Select an artifact</span>
                   <div id="artifactSelectedTags" class="d-flex flex-wrap gap-1 mt-1"></div>
+                  <div id="artifactSelectedSummary" class="small text-muted fst-italic mt-1"></div>
                 </div>
-                <div class="btn-group btn-group-sm">
+                <div class="btn-group btn-group-sm flex-wrap">
                   <button id="artifactRawBtn" class="btn btn-outline-secondary" type="button">Raw</button>
                   <button id="artifactCopyBtn" class="btn btn-outline-secondary" type="button">Copy</button>
                   <button id="artifactTagsBtn" class="btn btn-outline-secondary" type="button" disabled>Tags</button>
                   <button id="artifactRenameBtn" class="btn btn-outline-secondary" type="button" disabled>Rename</button>
                   <button id="artifactMoveBtn" class="btn btn-outline-secondary" type="button" disabled>Move</button>
+                  <div class="btn-group btn-group-sm" role="group">
+                    <button id="artifactAiBtn" class="btn btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" disabled>
+                      <i class="bi bi-stars me-1"></i>AI
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end">
+                      <li><button id="aiTagsBtn" class="dropdown-item" type="button"><i class="bi bi-tags me-2"></i>Auto-Generate Tags</button></li>
+                      <li><button id="aiRenameBtn" class="dropdown-item" type="button"><i class="bi bi-pencil-square me-2"></i>Suggest Rename</button></li>
+                      <li><button id="aiOrganizeBtn" class="dropdown-item" type="button"><i class="bi bi-folder-symlink me-2"></i>Suggest Folder</button></li>
+                      <li><button id="aiSummarizeBtn" class="dropdown-item" type="button"><i class="bi bi-card-text me-2"></i>Generate Summary</button></li>
+                      <li><hr class="dropdown-divider" /></li>
+                      <li><button id="aiCleanupBtn" class="dropdown-item" type="button"><i class="bi bi-magic me-2"></i>Proofread / Clean Up OCR</button></li>
+                    </ul>
+                  </div>
                   <button id="artifactRevealBtn" class="btn btn-outline-secondary" type="button" disabled>Folder</button>
                   <button id="artifactObsidianBtn" class="btn btn-outline-info d-none" type="button" disabled>Obsidian</button>
                   <a id="artifactDownloadBtn" class="btn btn-outline-primary disabled" href="#">Download</a>
@@ -347,13 +395,114 @@
       </div>
     </section>
 
-    <!-- VIEW 3: MODELS -->
+    <!-- VIEW 3: PROVIDERS & MODELS -->
     <section id="modelsView" class="app-view d-none">
+      <div class="row g-4 mb-4">
+        <div class="col-lg-7">
+          <div class="card shadow-sm h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <span class="fw-semibold"><i class="bi bi-sliders me-1"></i> Active Model Roles</span>
+              <button id="saveRolesBtn" class="btn btn-sm btn-primary" type="button">Save Roles</button>
+            </div>
+            <div class="card-body small">
+              <div class="border rounded p-3 mb-3 bg-body-tertiary">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <span class="fw-semibold">Vision / OCR Model</span>
+                  <span class="badge text-bg-primary">Mandatory</span>
+                </div>
+                <div class="row g-2">
+                  <div class="col-md-5">
+                    <label class="form-label mb-1" for="roleVisionProvider">Provider</label>
+                    <select id="roleVisionProvider" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="col-md-7">
+                    <label class="form-label mb-1" for="roleVisionModel">Model Name</label>
+                    <input id="roleVisionModel" list="visionModelDatalist" type="text" class="form-control form-control-sm" placeholder="e.g. glm-ocr, gpt-4.1-mini, gemini-2.5-flash" />
+                    <datalist id="visionModelDatalist"></datalist>
+                  </div>
+                </div>
+              </div>
+
+              <div class="border rounded p-3 bg-body-tertiary">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="form-check form-switch mb-0">
+                    <input id="roleLlmEnabled" class="form-check-input" type="checkbox" />
+                    <label class="form-check-label fw-semibold" for="roleLlmEnabled">Assistant LLM (Auto-tag, Rename, Organize, Summarize, Cleanup)</label>
+                  </div>
+                  <span class="badge text-bg-secondary">Optional</span>
+                </div>
+                <div id="roleLlmConfigFields">
+                  <div class="row g-2 mb-2">
+                    <div class="col-md-5">
+                      <label class="form-label mb-1" for="roleLlmProvider">Provider</label>
+                      <select id="roleLlmProvider" class="form-select form-select-sm"></select>
+                    </div>
+                    <div class="col-md-7">
+                      <label class="form-label mb-1" for="roleLlmModel">Small Local or Cloud LLM</label>
+                      <input id="roleLlmModel" list="llmModelDatalist" type="text" class="form-control form-control-sm" placeholder="e.g. qwen3:1.7b, llama3.2:3b, deepseek-chat" />
+                      <datalist id="llmModelDatalist"></datalist>
+                    </div>
+                  </div>
+                  <div class="d-flex flex-wrap gap-3 pt-1">
+                    <div class="form-check mb-0">
+                      <input id="roleAutoTag" class="form-check-input" type="checkbox" />
+                      <label class="form-check-label" for="roleAutoTag">Auto-tag after OCR</label>
+                    </div>
+                    <div class="form-check mb-0">
+                      <input id="roleAutoSummarize" class="form-check-input" type="checkbox" />
+                      <label class="form-check-label" for="roleAutoSummarize">Auto-summarize</label>
+                    </div>
+                    <div class="form-check mb-0">
+                      <input id="roleAutoRename" class="form-check-input" type="checkbox" />
+                      <label class="form-check-label" for="roleAutoRename">Auto-rename</label>
+                    </div>
+                    <div class="form-check mb-0">
+                      <input id="roleAutoOrganize" class="form-check-input" type="checkbox" />
+                      <label class="form-check-label" for="roleAutoOrganize">Auto-organize</label>
+                    </div>
+                    <div class="form-check mb-0">
+                      <input id="roleAllowNewFolders" class="form-check-input" type="checkbox" />
+                      <label class="form-check-label" for="roleAllowNewFolders">Allow creating new folders</label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-lg-5">
+          <div class="card shadow-sm h-100">
+            <div class="card-header fw-semibold"><i class="bi bi-plug me-1"></i> Provider Credentials &amp; Connection</div>
+            <div class="card-body small">
+              <div class="mb-2">
+                <label class="form-label fw-semibold mb-1" for="cfgProviderSelect">Provider</label>
+                <select id="cfgProviderSelect" class="form-select form-select-sm"></select>
+              </div>
+              <div class="mb-2">
+                <label class="form-label fw-semibold mb-1" for="cfgBaseUrl">Base URL</label>
+                <input id="cfgBaseUrl" type="url" class="form-control form-control-sm" />
+              </div>
+              <div class="mb-2">
+                <label class="form-label fw-semibold mb-1" for="cfgApiKey">API Key</label>
+                <input id="cfgApiKey" type="password" class="form-control form-control-sm" autocomplete="off" />
+              </div>
+              <div id="cfgEnvHint" class="text-muted mb-3"></div>
+              <div class="d-flex gap-2">
+                <button id="cfgTestProviderBtn" class="btn btn-sm btn-outline-primary" type="button">Test &amp; Fetch Models</button>
+                <button id="cfgSaveProviderBtn" class="btn btn-sm btn-primary" type="button">Save Provider</button>
+              </div>
+              <div id="cfgProviderResult" class="mt-2"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="row g-4">
         <div class="col-lg-7">
           <div class="card shadow-sm">
             <div class="card-header d-flex justify-content-between align-items-center">
-              <span class="fw-semibold"><i class="bi bi-hdd-stack me-1"></i> Installed Ollama Models</span>
+              <span class="fw-semibold"><i class="bi bi-hdd-stack me-1"></i> Installed Local Ollama Models</span>
               <button id="modelsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">
                 <i class="bi bi-arrow-clockwise me-1"></i> Refresh
               </button>
@@ -370,17 +519,17 @@
         </div>
         <div class="col-lg-5">
           <div class="card shadow-sm mb-4">
-            <div class="card-header fw-semibold"><i class="bi bi-cloud-download me-1"></i> Pull Any Model</div>
+            <div class="card-header fw-semibold"><i class="bi bi-cloud-download me-1"></i> Pull Any Ollama Model</div>
             <div class="card-body">
               <div class="input-group input-group-sm">
-                <input id="customPullInput" type="text" class="form-control" placeholder="e.g. glm-ocr, deepseek-ocr, qwen3-vl:4b" />
+                <input id="customPullInput" type="text" class="form-control" placeholder="e.g. glm-ocr, qwen3:1.7b, llama3.2:3b" />
                 <button id="customPullBtn" class="btn btn-primary" type="button">Pull</button>
               </div>
               <div id="modelActionStatus" class="small text-muted mt-2"></div>
             </div>
           </div>
           <div class="card shadow-sm">
-            <div class="card-header fw-semibold"><i class="bi bi-stars me-1"></i> Recommended Local OCR Models</div>
+            <div class="card-header fw-semibold"><i class="bi bi-stars me-1"></i> Recommended Local OCR &amp; Small LLMs</div>
             <div id="recommendedModelsList" class="list-group list-group-flush small"></div>
           </div>
         </div>
@@ -571,8 +720,8 @@
         </div>
         <ul class="nav nav-pills nav-justified small mb-4 gap-1" id="wizStepNav">
           <li class="nav-item"><button class="nav-link active" data-wiz-step="1" type="button">1. System</button></li>
-          <li class="nav-item"><button class="nav-link" data-wiz-step="2" type="button">2. Ollama</button></li>
-          <li class="nav-item"><button class="nav-link" data-wiz-step="3" type="button">3. Model</button></li>
+          <li class="nav-item"><button class="nav-link" data-wiz-step="2" type="button">2. Provider</button></li>
+          <li class="nav-item"><button class="nav-link" data-wiz-step="3" type="button">3. Models</button></li>
           <li class="nav-item"><button class="nav-link" data-wiz-step="4" type="button">4. Archive & App</button></li>
           <li class="nav-item"><button class="nav-link" data-wiz-step="5" type="button">5. Finish</button></li>
         </ul>
@@ -582,7 +731,7 @@
             <!-- Step 1 -->
             <div class="wiz-step" data-step="1">
               <h4 class="mb-2">Welcome to OcrPipeline</h4>
-              <p class="text-muted">Archive handwritten notes, equations, tables, and diagrams from PDFs or images into structured Markdown—100% locally and free using Ollama.</p>
+              <p class="text-muted">Archive handwritten notes, equations, tables, and diagrams from PDFs or images into structured Markdown using local engines (Ollama, llama.cpp) or cloud Vision providers.</p>
               <div class="card bg-body-tertiary border mb-3">
                 <div class="card-body small">
                   <div class="fw-semibold mb-2"><i class="bi bi-pc-display me-1"></i> Detected Hardware & Environment</div>
@@ -592,26 +741,36 @@
                   <div id="wizVramNote" class="mt-2 text-primary fw-medium"></div>
                 </div>
               </div>
-              <div class="small text-muted">Click <strong>Next</strong> to verify or start your local Ollama engine.</div>
+              <div class="small text-muted">Click <strong>Next</strong> to choose your local or cloud Vision OCR provider.</div>
             </div>
 
             <!-- Step 2 -->
             <div class="wiz-step d-none" data-step="2">
-              <h4 class="mb-2">Connect Local Ollama Engine</h4>
-              <p class="text-muted small">OcrPipeline runs vision/OCR models locally via Ollama so your documents never leave your machine.</p>
-              <div class="mb-3">
-                <label class="form-label small fw-semibold">Ollama Server URL</label>
-                <div class="input-group input-group-sm">
-                  <input id="wizOllamaUrl" type="url" class="form-control" value="http://localhost:11434" />
-                  <button id="wizRecheckBtn" class="btn btn-outline-secondary" type="button">Test Connection</button>
-                  <button id="wizStartOllamaBtn" class="btn btn-primary d-none" type="button">Start Ollama</button>
+              <h4 class="mb-2">Choose Your Vision OCR Provider</h4>
+              <p class="text-muted small">Use local <strong>Ollama</strong> / <strong>llama.cpp</strong> for 100% offline privacy, or connect <strong>OpenAI</strong>, <strong>Anthropic</strong>, <strong>Google Gemini</strong>, <strong>Grok</strong>, <strong>Qwen</strong>, or any OpenAI-compatible server.</p>
+              <div class="row g-2 mb-3">
+                <div class="col-md-5">
+                  <label class="form-label small fw-semibold" for="wizVisionProvider">Vision Provider</label>
+                  <select id="wizVisionProvider" class="form-select form-select-sm"></select>
+                </div>
+                <div class="col-md-7">
+                  <label class="form-label small fw-semibold" for="wizOllamaUrl">Endpoint Base URL</label>
+                  <div class="input-group input-group-sm">
+                    <input id="wizOllamaUrl" type="url" class="form-control" value="http://localhost:11434" />
+                    <button id="wizRecheckBtn" class="btn btn-outline-secondary" type="button">Test Connection</button>
+                    <button id="wizStartOllamaBtn" class="btn btn-primary d-none" type="button">Start Ollama</button>
+                  </div>
+                </div>
+                <div class="col-12 d-none" id="wizApiKeyRow">
+                  <label class="form-label small fw-semibold" for="wizApiKey">API Key</label>
+                  <input id="wizApiKey" type="password" class="form-control form-control-sm" placeholder="Enter provider API key (or rely on environment variable)" autocomplete="off" />
                 </div>
               </div>
-              <div id="wizOllamaAlert" class="alert alert-secondary small mb-3">Checking Ollama status...</div>
+              <div id="wizOllamaAlert" class="alert alert-secondary small mb-3">Checking provider connection...</div>
               <div id="wizInstallGuide" class="card border d-none">
                 <div class="card-body small">
                   <div class="fw-semibold mb-1">Ollama Not Detected — Quick Install</div>
-                  <p class="text-muted mb-2">Install Ollama for your OS, then click <strong>Test Connection</strong>:</p>
+                  <p class="text-muted mb-2">Install Ollama for local offline OCR, or switch to another provider above:</p>
                   <ul class="mb-2">
                     <li><strong>Windows:</strong> <code>winget install Ollama.Ollama</code></li>
                     <li><strong>macOS:</strong> <code>brew install ollama</code></li>
@@ -626,16 +785,36 @@
 
             <!-- Step 3 -->
             <div class="wiz-step d-none" data-step="3">
-              <h4 class="mb-2">Choose & Download Your OCR Model</h4>
-              <p class="text-muted small">Select your default local model. For most laptops (including 8 GB VRAM GPUs), <strong>glm-ocr</strong> is fast and avoids shared-memory slowdowns.</p>
+              <h4 class="mb-2">Vision OCR Model &amp; Optional Assistant LLM</h4>
+              <p class="text-muted small">Pick your required <strong>Vision Model</strong> for OCR. Optionally enable a small local/cloud <strong>Assistant LLM</strong> for auto-tagging, renaming, folder organization, and summaries.</p>
+              <div class="mb-3">
+                <label class="form-label small fw-semibold" for="wizVisionModel">Vision OCR Model (Mandatory)</label>
+                <input id="wizVisionModel" list="wizVisionModelDatalist" type="text" class="form-control form-control-sm" value="glm-ocr" />
+                <datalist id="wizVisionModelDatalist"></datalist>
+              </div>
               <div id="wizModelCards" class="row g-2 mb-3"></div>
-              <div id="wizPullPanel" class="border rounded p-3 bg-body-tertiary d-none">
+              <div id="wizPullPanel" class="border rounded p-3 bg-body-tertiary mb-3 d-none">
                 <div class="d-flex justify-content-between small mb-1">
                   <span id="wizPullStatusText">Preparing download...</span>
                   <span id="wizPullPercent">0%</span>
                 </div>
                 <div class="progress" style="height: 10px;">
                   <div id="wizPullBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%;"></div>
+                </div>
+              </div>
+              <div class="border rounded p-3 bg-body-tertiary">
+                <div class="form-check form-switch mb-2">
+                  <input id="wizLlmEnabled" class="form-check-input" type="checkbox" />
+                  <label class="form-check-label small fw-semibold" for="wizLlmEnabled">Enable Optional Assistant LLM (Auto-tag, Rename, Organize, Summarize)</label>
+                </div>
+                <div id="wizLlmFields" class="row g-2 opacity-50">
+                  <div class="col-md-5">
+                    <select id="wizLlmProvider" class="form-select form-select-sm" disabled></select>
+                  </div>
+                  <div class="col-md-7">
+                    <input id="wizLlmModel" list="wizLlmModelDatalist" type="text" class="form-control form-control-sm" placeholder="e.g. qwen3:1.7b, llama3.2:3b" disabled />
+                    <datalist id="wizLlmModelDatalist"></datalist>
+                  </div>
                 </div>
               </div>
             </div>
@@ -792,6 +971,57 @@
           <button type="submit" class="btn btn-sm btn-primary">Save Tags</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <div class="modal fade" id="aiCleanupModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header py-2">
+          <h6 class="modal-title fw-semibold"><i class="bi bi-magic me-1"></i> AI OCR Proofread &amp; Cleanup Preview</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="small text-muted mb-2" id="aiCleanupFileLabel"></div>
+          <div id="aiCleanupPreview" class="markdown-preview border rounded p-3 bg-body"></div>
+        </div>
+        <div class="modal-footer py-2">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-sm btn-primary" id="aiCleanupApplyBtn">Apply Cleaned Markdown</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="aiOrganizeModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header py-2">
+          <h6 class="modal-title fw-semibold"><i class="bi bi-stars me-1"></i> AI Organize Folder Plan</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="small text-muted mb-2" id="aiOrganizeStatus">Review suggested folder moves, filenames, and tags before applying:</div>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle small mb-0">
+              <thead>
+                <tr>
+                  <th><input id="aiOrganizeSelectAll" type="checkbox" class="form-check-input" checked /></th>
+                  <th>File</th>
+                  <th>Suggested Folder</th>
+                  <th>Suggested Name</th>
+                  <th>Tags</th>
+                </tr>
+              </thead>
+              <tbody id="aiOrganizeBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-footer py-2">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-sm btn-primary" id="aiOrganizeApplyBtn">Apply Selected</button>
+        </div>
+      </div>
     </div>
   </div>
 

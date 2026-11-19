@@ -126,6 +126,19 @@ def update_artifact_tags(file_path: Path, tags: list[str]) -> list[str]:
     return cleaned
 
 
+def update_artifact_summary(file_path: Path, summary: str) -> str:
+    """Update or remove the YAML frontmatter summary field on a Markdown artifact."""
+    text = file_path.read_text(encoding="utf-8", errors="replace")
+    meta, body = parse_frontmatter(text)
+    cleaned = " ".join(summary.strip().split())
+    if cleaned:
+        meta["summary"] = cleaned
+    else:
+        meta.pop("summary", None)
+    file_path.write_text(format_frontmatter(meta, body), encoding="utf-8")
+    return cleaned
+
+
 def ensure_obsidian_vault(archive_dir: Path) -> Path:
     """Initialize minimal Obsidian vault configuration inside archive_dir."""
     root = archive_dir.expanduser().resolve()
@@ -262,6 +275,7 @@ def scan_artifacts(
                     "name": md_file.name,
                     "title": str(meta.get("title") or md_file.stem),
                     "tags": doc_tags,
+                    "summary": str(meta.get("summary") or ""),
                     "size_bytes": stat.st_size,
                     "mtime": stat.st_mtime,
                     "modified_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),

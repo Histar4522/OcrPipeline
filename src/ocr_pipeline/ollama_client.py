@@ -15,7 +15,11 @@ import httpx
 from .config import OcrConfig
 
 
-class OllamaError(RuntimeError):
+class ProviderError(RuntimeError):
+    """Raised when a model provider is unreachable, misconfigured, or fails inference."""
+
+
+class OllamaError(ProviderError):
     """Raised when Ollama is unreachable, missing a model, or fails inference."""
 
 

@@ -106,3 +106,47 @@ def test_notification_mode_normalization_and_conditions(tmp_path: Path) -> None:
     assert win_state["focused"] is False
     api.set_focus(True)
     assert win_state["focused"] is True
+
+
+def test_legacy_settings_migration_and_api_key_masking(tmp_path: Path, monkeypatch: object) -> None:
+    import json
+    from ocr_pipeline.settings import (
+        MASKED_SECRET,
+        apply_provider_updates,
+        mask_settings_for_api,
+        resolve_llm_endpoint,
+        resolve_vision_endpoint,
+    )
+
+    cfg_path = tmp_path / "old_settings.json"
+    cfg_path.write_text(
+        json.dumps({"ollama_url": "http://10.0.0.5:11434", "default_model": "deepseek-ocr"}),
+        encoding="utf-8",
+    )
+    migrated = load_settings(cfg_path)
+    assert migrated.vision_provider == "ollama"
+    assert migrated.vision_model == "deepseek-ocr"
+    assert migrated.providers["ollama"]["base_url"] == "http://10.0.0.5:11434"
+    assert resolve_llm_endpoint(migrated) is None
+
+    apply_provider_updates(migrated, {"openai": {"base_url": "https://api.openai.com/v1", "api_key": "sk-secret-999"}})
+    masked = mask_settings_for_api(migrated)
+    assert masked["providers"]["openai"]["api_key"] == MASKED_SECRET
+    assert masked["providers"]["openai"]["has_key"] is True
+
+    # Sending masked placeholder back must preserve the real key
+    apply_provider_updates(migrated, {"openai": {"api_key": MASKED_SECRET}})
+    assert migrated.providers["openai"]["api_key"] == "sk-secret-999"
+
+    migrated.vision_provider = "openai"
+    migrated.vision_model = "gpt-4.1-mini"
+    vis_ep = resolve_vision_endpoint(migrated)
+    assert vis_ep.provider_id == "openai"
+    assert vis_ep.api_key == "sk-secret-999"
+
+    migrated.llm_enabled = True
+    migrated.llm_provider = "ollama"
+    migrated.llm_model = "qwen3:1.7b"
+    llm_ep = resolve_llm_endpoint(migrated)
+    assert llm_ep is not None and llm_ep.model == "qwen3:1.7b"
+    assert resolve_vision_endpoint(migrated).provider_id == "openai"

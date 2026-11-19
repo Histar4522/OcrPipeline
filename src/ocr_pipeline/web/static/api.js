@@ -9,6 +9,13 @@ async function requestJson(url, options) {
 }
 
 export const fetchHealth = () => requestJson("/api/health");
+export const fetchProviders = () => requestJson("/api/providers");
+export const testProvider = (payload) =>
+  requestJson("/api/providers/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 export const fetchSystemInfo = () => requestJson("/api/system-info");
 export const openExternalUrl = (url) =>
   requestJson("/api/open-url", {
@@ -105,6 +112,54 @@ export const revealArtifact = (path = "") =>
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path }),
+  });
+export const saveArtifactContent = (path, content) =>
+  requestJson("/api/artifacts/content", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, content }),
+  });
+export const aiSuggestTags = (path, apply = true) =>
+  requestJson("/api/artifacts/ai/tags", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, apply }),
+  });
+export const aiSuggestRename = (path) =>
+  requestJson("/api/artifacts/ai/rename", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+export const aiSuggestFolder = (path) =>
+  requestJson("/api/artifacts/ai/organize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+export const aiSummarizeArtifact = (path) =>
+  requestJson("/api/artifacts/ai/summarize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+export const aiCleanupArtifact = (path) =>
+  requestJson("/api/artifacts/ai/cleanup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+export const aiBatchOrganizePlan = (cwd = "") =>
+  requestJson("/api/artifacts/ai/batch-plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd }),
+  });
+export const aiBatchOrganizeApply = (items) =>
+  requestJson("/api/artifacts/ai/batch-apply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
   });
 
 export const fetchJobs = () => requestJson("/api/jobs");

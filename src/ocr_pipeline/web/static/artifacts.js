@@ -1,4 +1,11 @@
 import {
+  aiBatchOrganizeApply,
+  aiBatchOrganizePlan,
+  aiCleanupArtifact,
+  aiSuggestFolder,
+  aiSuggestRename,
+  aiSuggestTags,
+  aiSummarizeArtifact,
   artifactDownloadUrl,
   createArtifactFolder,
   deleteArtifact,
@@ -9,6 +16,7 @@ import {
   openInObsidian,
   renameArtifactFolder,
   revealArtifact,
+  saveArtifactContent,
   updateArtifactTags,
 } from "./api.js";
 import { bsConfirm, bsEditTags, bsMoveArtifact, bsPrompt, triggerDownload } from "./dialogs.js";
@@ -28,6 +36,7 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
     rawMode: false,
     rawText: "",
     obsidianMode: false,
+    llmAvailable: false,
   };
 
   function notifyChanged() {
@@ -53,16 +62,24 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
     el("artifactTagsBtn").disabled = !enabled;
     el("artifactRenameBtn").disabled = !enabled;
     el("artifactMoveBtn").disabled = !enabled;
+    el("artifactAiBtn").disabled = !enabled || !artState.llmAvailable;
     el("artifactRevealBtn").disabled = !enabled;
     el("artifactObsidianBtn").disabled = !enabled;
     el("artifactDeleteBtn").disabled = !enabled;
     el("artifactDownloadBtn").classList.toggle("disabled", !enabled);
   }
 
+  function setLlmAvailable(available) {
+    artState.llmAvailable = Boolean(available);
+    el("aiOrganizeFolderBtn").disabled = !artState.llmAvailable;
+    el("artifactAiBtn").disabled = !artState.selected || !artState.llmAvailable;
+  }
+
   function clearSelection() {
     artState.selected = null;
     artState.rawText = "";
     el("artifactSelectedPath").textContent = "Select an artifact";
+    el("artifactSelectedSummary").textContent = "";
     renderSelectedTags([]);
     setActionsEnabled(false);
     renderPreview();
@@ -71,6 +88,7 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
   async function selectArtifact(item) {
     artState.selected = item;
     el("artifactSelectedPath").textContent = item.path;
+    el("artifactSelectedSummary").textContent = item.summary || "";
     renderSelectedTags(item.tags);
     el("artifactDownloadBtn").href = artifactDownloadUrl(item.path);
     setActionsEnabled(true);
@@ -279,7 +297,8 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
         <div class="d-flex flex-wrap gap-1 mt-1 tag-row"></div>`;
       btn.querySelector(".file-title").textContent = item.name;
       const folderHint = filtering && item.folder ? `${item.folder} · ` : "";
-      btn.querySelector(".meta-line").textContent = `${folderHint}${item.modified_at}`;
+      const summaryHint = item.summary ? ` · ${item.summary}` : "";
+      btn.querySelector(".meta-line").textContent = `${folderHint}${item.modified_at}${summaryHint}`;
       const tagRow = btn.querySelector(".tag-row");
       for (const t of (item.tags || []).slice(0, 4)) {
         const badge = document.createElement("span");
@@ -455,6 +474,182 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
     }
   });
 
+  el("aiTagsBtn").addEventListener("click", async () => {
+    if (!artState.selected) return;
+    showToast("AI Tags", "Analyzing document tags...");
+    try {
+      const res = await aiSuggestTags(artState.selected.path, true);
+      artState.selected.tags = res.tags;
+      await selectArtifact(artState.selected);
+      await refresh();
+      notifyChanged();
+      showToast("AI Tags Applied", res.tags.map((t) => `#${t}`).join(" ") || "No tags suggested.", "success");
+    } catch (err) {
+      showToast("AI Tag Error", err.message, "danger");
+    }
+  });
+
+  el("aiRenameBtn").addEventListener("click", async () => {
+    if (!artState.selected) return;
+    showToast("AI Rename", "Generating suggested filename...");
+    try {
+      const suggestion = await aiSuggestRename(artState.selected.path);
+      const nextName = await bsPrompt({
+        title: "AI Suggested Rename",
+        label: "Confirm or edit suggested filename (.md)",
+        value: suggestion.suggested_name,
+        confirmText: "Rename",
+      });
+      if (!nextName || !nextName.trim() || nextName.trim() === artState.selected.name) return;
+      const res = await moveOrRenameArtifact(artState.selected.path, { newName: nextName.trim() });
+      showToast("Renamed", res.path, "success");
+      await refresh();
+      const updated = artState.items.find((i) => i.path === res.path);
+      if (updated) await selectArtifact(updated);
+    } catch (err) {
+      showToast("AI Rename Error", err.message, "danger");
+    }
+  });
+
+  el("aiOrganizeBtn").addEventListener("click", async () => {
+    if (!artState.selected) return;
+    showToast("AI Organize", "Finding best archive folder...");
+    try {
+      const suggestion = await aiSuggestFolder(artState.selected.path);
+      const ok = await bsConfirm({
+        title: "AI Suggested Folder",
+        message: `Move "${artState.selected.name}" to "${suggestion.folder || "(Archive Root)"}"?\n${suggestion.reason || ""}`,
+        confirmText: "Move",
+        variant: "primary",
+      });
+      if (!ok) return;
+      const res = await moveOrRenameArtifact(artState.selected.path, { targetFolder: suggestion.folder });
+      showToast("Moved", res.path, "success");
+      artState.cwd = suggestion.folder;
+      await refresh();
+      notifyChanged();
+      const updated = artState.items.find((i) => i.path === res.path);
+      if (updated) await selectArtifact(updated);
+    } catch (err) {
+      showToast("AI Organize Error", err.message, "danger");
+    }
+  });
+
+  el("aiSummarizeBtn").addEventListener("click", async () => {
+    if (!artState.selected) return;
+    showToast("AI Summary", "Summarizing note...");
+    try {
+      const res = await aiSummarizeArtifact(artState.selected.path);
+      artState.selected.summary = res.summary;
+      await selectArtifact(artState.selected);
+      await refresh();
+      showToast("Summary Saved", res.summary || "Updated.", "success");
+    } catch (err) {
+      showToast("AI Summary Error", err.message, "danger");
+    }
+  });
+
+  let pendingCleanup = null;
+  el("aiCleanupBtn").addEventListener("click", async () => {
+    if (!artState.selected) return;
+    showToast("AI Proofread", "Cleaning OCR typos and formatting...");
+    try {
+      const res = await aiCleanupArtifact(artState.selected.path);
+      pendingCleanup = { path: artState.selected.path, content: res.cleaned_markdown };
+      el("aiCleanupFileLabel").textContent = artState.selected.path;
+      renderMarkdownContent(el("aiCleanupPreview"), res.cleaned_markdown, false);
+      window.bootstrap.Modal.getOrCreateInstance(el("aiCleanupModal")).show();
+    } catch (err) {
+      showToast("AI Cleanup Error", err.message, "danger");
+    }
+  });
+
+  el("aiCleanupApplyBtn").addEventListener("click", async () => {
+    if (!pendingCleanup) return;
+    try {
+      await saveArtifactContent(pendingCleanup.path, pendingCleanup.content);
+      window.bootstrap.Modal.getOrCreateInstance(el("aiCleanupModal")).hide();
+      if (artState.selected?.path === pendingCleanup.path) {
+        await selectArtifact(artState.selected);
+      }
+      await refresh();
+      showToast("Cleanup Applied", "Saved cleaned Markdown.", "success");
+    } catch (err) {
+      showToast("Save Failed", err.message, "danger");
+    }
+  });
+
+  let pendingBatchPlan = [];
+  el("aiOrganizeFolderBtn").addEventListener("click", async () => {
+    showToast("AI Organize", "Analyzing folder files...");
+    try {
+      const res = await aiBatchOrganizePlan(artState.cwd);
+      pendingBatchPlan = res.plan || [];
+      const tbody = el("aiOrganizeBody");
+      tbody.innerHTML = "";
+      if (!pendingBatchPlan.length) {
+        el("aiOrganizeStatus").textContent = "No artifacts found in current folder.";
+      } else {
+        el("aiOrganizeStatus").textContent = `Review ${pendingBatchPlan.length} item(s) before applying:`;
+        pendingBatchPlan.forEach((row, idx) => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td><input type="checkbox" class="form-check-input batch-row-check" data-idx="${idx}" checked /></td>
+            <td class="text-truncate" style="max-width: 170px;"></td>
+            <td><input type="text" class="form-control form-control-sm batch-folder" data-idx="${idx}" /></td>
+            <td><input type="text" class="form-control form-control-sm batch-name" data-idx="${idx}" /></td>
+            <td class="batch-tags text-muted"></td>`;
+          tr.querySelector("td:nth-child(2)").textContent = row.current_name;
+          tr.querySelector(".batch-folder").value = row.suggested_folder || "";
+          tr.querySelector(".batch-name").value = row.suggested_name || row.current_name;
+          tr.querySelector(".batch-tags").textContent = (row.suggested_tags || []).map((t) => `#${t}`).join(" ");
+          tbody.appendChild(tr);
+        });
+      }
+      el("aiOrganizeSelectAll").checked = true;
+      window.bootstrap.Modal.getOrCreateInstance(el("aiOrganizeModal")).show();
+    } catch (err) {
+      showToast("AI Organize Error", err.message, "danger");
+    }
+  });
+
+  el("aiOrganizeSelectAll").addEventListener("change", (e) => {
+    document.querySelectorAll("#aiOrganizeBody .batch-row-check").forEach((cb) => {
+      cb.checked = e.target.checked;
+    });
+  });
+
+  el("aiOrganizeApplyBtn").addEventListener("click", async () => {
+    const items = [];
+    document.querySelectorAll("#aiOrganizeBody .batch-row-check:checked").forEach((cb) => {
+      const idx = Number(cb.dataset.idx);
+      const row = pendingBatchPlan[idx];
+      if (!row) return;
+      const folderInput = document.querySelector(`#aiOrganizeBody .batch-folder[data-idx="${idx}"]`);
+      const nameInput = document.querySelector(`#aiOrganizeBody .batch-name[data-idx="${idx}"]`);
+      items.push({
+        path: row.path,
+        target_folder: folderInput.value.trim(),
+        new_name: nameInput.value.trim() || row.current_name,
+        tags: row.suggested_tags || [],
+        summary: row.summary || "",
+        apply_tags: Boolean(row.suggested_tags?.length),
+        apply_move: true,
+      });
+    });
+    if (!items.length) return;
+    try {
+      const res = await aiBatchOrganizeApply(items);
+      window.bootstrap.Modal.getOrCreateInstance(el("aiOrganizeModal")).hide();
+      clearSelection();
+      await refresh();
+      notifyChanged();
+      showToast("Batch Organize Complete", `Updated ${res.applied} artifact(s).`, res.errors?.length ? "warning" : "success");
+    } catch (err) {
+      showToast("Apply Failed", err.message, "danger");
+    }
+  });
+
   renderPreview();
-  return { refresh };
+  return { refresh, setLlmAvailable };
 }

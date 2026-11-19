@@ -22,6 +22,9 @@ class OcrConfig:
     """Runtime configuration for the OCR pipeline."""
 
     model: str = "glm-ocr"
+    provider: str = "ollama"
+    base_url: str = ""
+    api_key: str = ""
     ollama_url: str = "http://localhost:11434"
     dpi: int = 220
     max_image_dim: int = 1536
@@ -34,3 +37,9 @@ class OcrConfig:
     tags: tuple[str, ...] = ()
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     user_prompt: str = DEFAULT_USER_PROMPT
+
+    def __post_init__(self) -> None:
+        if not self.base_url and self.ollama_url:
+            self.base_url = self.ollama_url
+        if self.provider == "ollama" and self.base_url:
+            self.ollama_url = self.base_url

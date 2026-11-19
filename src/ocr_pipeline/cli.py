@@ -11,7 +11,8 @@ import uvicorn
 
 from .config import OcrConfig
 from .discovery import discover_documents
-from .ollama_client import OllamaError, check_ollama_ready
+from .ollama_client import ProviderError
+from .providers import ProviderEndpoint, check_endpoint_ready, resolve_api_key, resolve_base_url
 from .runner import run_pipeline
 from .web.server import create_app
 
@@ -61,14 +62,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not automatically open the Web UI in the default browser.",
     )
     parser.add_argument(
-        "--model",
-        default="glm-ocr",
-        help="Ollama OCR/vision model name (default: glm-ocr; alternatives: deepseek-ocr, qwen3-vl:4b, qwen3-vl:8b).",
+        "--provider",
+        default="ollama",
+        help="Vision provider: ollama, llama_cpp, openai, anthropic, google, xai, qwen, custom (default: ollama).",
     )
     parser.add_argument(
+        "--model",
+        default="glm-ocr",
+        help="Vision OCR model name (default: glm-ocr).",
+    )
+    parser.add_argument(
+        "--base-url",
         "--ollama-url",
+        dest="base_url",
         default=None,
-        help="Ollama server base URL (default: from settings or http://localhost:11434).",
+        help="Provider API base URL (defaults to provider standard URL or http://localhost:11434).",
+    )
+    parser.add_argument(
+        "--api-key",
+        default="",
+        help="Provider API key (falls back to provider environment variable).",
     )
     parser.add_argument(
         "--dpi",
@@ -109,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _launch_server(args: argparse.Namespace, console: Console) -> int:
     url = f"http://localhost:{args.port}"
     console.print(f"[bold cyan]Starting OcrPipeline Web UI[/bold cyan] at [underline]{url}[/underline]")
-    app = create_app(ollama_url=args.ollama_url)
+    app = create_app(ollama_url=args.base_url)
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
@@ -125,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.app:
         from .desktop import launch_desktop_app
 
-        return launch_desktop_app(ollama_url=args.ollama_url)
+        return launch_desktop_app(ollama_url=args.base_url if args.provider == "ollama" else None)
 
     if args.server:
         return _launch_server(args, console)
@@ -133,9 +146,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.input_path is None or args.output is None:
         parser.error("input_path and -o/--output are required unless --app or --server is specified.")
 
+    resolved_url = resolve_base_url(args.provider, args.base_url or "")
+    resolved_key = resolve_api_key(args.provider, args.api_key or "")
     config = OcrConfig(
         model=args.model,
-        ollama_url=args.ollama_url or "http://localhost:11434",
+        provider=args.provider,
+        base_url=resolved_url,
+        api_key=resolved_key,
+        ollama_url=resolved_url if args.provider == "ollama" else "http://localhost:11434",
         dpi=args.dpi,
         max_image_dim=args.max_dim,
         timeout_seconds=args.timeout,
@@ -154,9 +172,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        check_ollama_ready(config.ollama_url, config.model)
-    except OllamaError as exc:
-        console.print(f"[red]Ollama check failed:[/red] {exc}")
+        endpoint = ProviderEndpoint(
+            provider_id=config.provider,
+            base_url=config.base_url,
+            api_key=config.api_key,
+            model=config.model,
+            num_ctx=config.num_ctx,
+            timeout_seconds=config.timeout_seconds,
+        )
+        check_endpoint_ready(endpoint, require_vision=True)
+    except ProviderError as exc:
+        console.print(f"[red]Provider check failed:[/red] {exc}")
         return 1
 
     summary = run_pipeline(tasks, args.output, config, console=console)

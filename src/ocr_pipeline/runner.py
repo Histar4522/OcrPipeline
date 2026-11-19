@@ -26,8 +26,9 @@ from rich.progress import (
 from .artifacts import format_frontmatter, normalize_tags
 from .config import OcrConfig
 from .discovery import DocumentTask
-from .ollama_client import JobCancelledError, ocr_image_b64
+from .ollama_client import JobCancelledError
 from .preprocess import PreparedImage, count_pdf_pages, prepare_image, render_pdf_page
+from .providers import vision_ocr_with_config
 
 OcrFn = Callable[..., str]
 # ponytail: per-document prefetch (2 pages); add cross-document prefetch only if multi-1-page-PDF batches show stalls
@@ -259,7 +260,7 @@ def run_pipeline(
     tasks: list[DocumentTask],
     output_dir: Path,
     config: OcrConfig,
-    ocr_fn: OcrFn = ocr_image_b64,
+    ocr_fn: OcrFn = vision_ocr_with_config,
     console: Console | None = None,
     on_progress: ProgressCallback | None = None,
     cancel_event: threading.Event | None = None,
@@ -308,8 +309,9 @@ def run_pipeline(
             )
 
     logger.info(
-        "Starting OCR run: docs=%d model=%s dpi=%d max_dim=%d num_ctx=%d force=%s prefetch=%d",
+        "Starting OCR run: docs=%d provider=%s model=%s dpi=%d max_dim=%d num_ctx=%d force=%s prefetch=%d",
         len(tasks),
+        config.provider,
         config.model,
         config.dpi,
         config.max_image_dim,
