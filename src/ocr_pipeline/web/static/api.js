@@ -16,6 +16,12 @@ export const testProvider = (payload) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+export const estimateLlmVram = (payload) =>
+  requestJson("/api/llm/vram-estimate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 export const fetchSystemInfo = () => requestJson("/api/system-info");
 export const openExternalUrl = (url) =>
   requestJson("/api/open-url", {

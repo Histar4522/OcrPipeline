@@ -788,3 +788,28 @@ def test_post_ocr_llm_automation_and_nonfatal_error(tmp_path: Path, monkeypatch:
         j2 = client.get(f"/api/jobs/{job2}").json()
     assert j2["status"] == "completed"
     assert "LLM WARN" in client.get(f"/api/jobs/{job2}/log").text
+
+
+def test_server_vram_estimate_endpoint(tmp_path: Path) -> None:
+    client = _make_test_app(tmp_path)
+    prov = client.get("/api/providers")
+    assert prov.status_code == 200
+    assert "vram_plan" in prov.json()["llm"]
+    assert prov.json()["llm"]["auto_ctx"] is True
+
+    est_local = client.post(
+        "/api/llm/vram-estimate",
+        json={"provider": "ollama", "model": "qwen3:1.7b"},
+    )
+    assert est_local.status_code == 200
+    assert est_local.json()["is_local"] is True
+    assert est_local.json()["recommended_max_ctx"] >= 2048
+    assert est_local.json()["split_threshold_tokens"] >= 1200
+
+    est_cloud = client.post(
+        "/api/llm/vram-estimate",
+        json={"provider": "openai", "model": "gpt-4.1-mini"},
+    )
+    assert est_cloud.status_code == 200
+    assert est_cloud.json()["is_local"] is False
+    assert est_cloud.json()["vram_at_recommended_gb"] == 0.0

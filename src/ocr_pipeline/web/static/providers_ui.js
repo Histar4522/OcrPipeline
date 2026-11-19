@@ -1,5 +1,6 @@
 import {
   deleteModel,
+  estimateLlmVram,
   fetchModels,
   fetchProviders,
   fetchSettings,
@@ -57,6 +58,48 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
     el("roleAutoRename").disabled = !enabled;
     el("roleAutoOrganize").disabled = !enabled;
     el("roleAllowNewFolders").disabled = !enabled;
+    el("roleLlmAutoCtx").disabled = !enabled;
+  }
+
+  function renderVramPlan(plan) {
+    const box = el("llmVramEstimateBox");
+    if (!box) return;
+    if (!plan) {
+      box.textContent = "";
+      return;
+    }
+    box.className = plan.fits_in_vram ? "text-muted" : "text-warning";
+    box.textContent = plan.summary_text || "";
+  }
+
+  let vramTimer = null;
+  function scheduleVramEstimate(probeOllama = false) {
+    clearTimeout(vramTimer);
+    vramTimer = setTimeout(async () => {
+      const pid = el("roleLlmProvider").value || "ollama";
+      const model = el("roleLlmModel").value.trim() || "qwen3:1.7b";
+      const installed = (pState.ollamaData?.detailed || []).find(
+        (m) => m.name === model || m.name === `${model}:latest`
+      );
+      try {
+        const plan = await estimateLlmVram({
+          provider: pid,
+          model,
+          auto_ctx: el("roleLlmAutoCtx").checked,
+          probe_ollama: probeOllama,
+          ...(installed
+            ? {
+                model_size_gb: installed.size_gb,
+                parameter_size: installed.parameter_size,
+                quantization: installed.quantization_level,
+              }
+            : {}),
+        });
+        renderVramPlan(plan);
+      } catch {
+        // Ignore transient UI estimate failures
+      }
+    }, 220);
   }
 
   function renderProviderConfigEditor(pid) {
@@ -229,12 +272,15 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
     el("roleAutoRename").checked = Boolean(settings.auto_rename_on_ocr);
     el("roleAutoOrganize").checked = Boolean(settings.auto_organize_on_ocr);
     el("roleAllowNewFolders").checked = Boolean(settings.auto_organize_allow_new_folders);
+    el("roleLlmAutoCtx").checked = settings.llm_auto_ctx !== false;
 
     cfgSelect.value = prevCfg && specFor(prevCfg) ? prevCfg : (settings.vision_provider || "ollama");
     renderProviderConfigEditor(cfgSelect.value);
     syncLlmRoleDisabledState();
     renderOllamaModels(ollamaData);
     updateRoleDatalists();
+    renderVramPlan(provData.llm?.vram_plan);
+    scheduleVramEstimate(settings.llm_provider === "ollama" && Boolean(settings.llm_model));
   }
 
   el("roleVisionProvider").addEventListener("change", () => {
@@ -244,7 +290,13 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
     }
     updateRoleDatalists();
   });
-  el("roleLlmProvider").addEventListener("change", updateRoleDatalists);
+  el("roleLlmProvider").addEventListener("change", () => {
+    updateRoleDatalists();
+    scheduleVramEstimate(el("roleLlmProvider").value === "ollama");
+  });
+  el("roleLlmModel").addEventListener("input", () => scheduleVramEstimate(false));
+  el("roleLlmModel").addEventListener("change", () => scheduleVramEstimate(true));
+  el("roleLlmAutoCtx").addEventListener("change", () => scheduleVramEstimate(false));
   el("roleLlmEnabled").addEventListener("change", syncLlmRoleDisabledState);
   el("cfgProviderSelect").addEventListener("change", (e) => renderProviderConfigEditor(e.target.value));
 
@@ -265,6 +317,7 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
       auto_rename_on_ocr: el("roleAutoRename").checked,
       auto_organize_on_ocr: el("roleAutoOrganize").checked,
       auto_organize_allow_new_folders: el("roleAllowNewFolders").checked,
+      llm_auto_ctx: el("roleLlmAutoCtx").checked,
     });
     showToast("Roles Saved", "Updated active Vision & Assistant LLM settings.", "success");
     await refresh();

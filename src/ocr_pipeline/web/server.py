@@ -35,6 +35,7 @@ from ..artifacts import (
 )
 from ..config import DEFAULT_SYSTEM_PROMPT, OcrConfig
 from ..discovery import IMAGE_EXTENSIONS, PDF_EXTENSION, DocumentTask, discover_documents
+from ..llm_context import calculate_vram_plan
 from ..llm_features import (
     analyze_artifact_all,
     cleanup_ocr_markdown,
@@ -57,6 +58,7 @@ from ..ollama_client import (
 )
 from ..platform_utils import generate_app_icon_image, get_system_info, open_in_file_manager
 from ..providers import (
+    ProviderEndpoint,
     check_endpoint_ready,
     list_providers_metadata,
     test_provider_connection,
@@ -526,12 +528,13 @@ def create_app(
             current.vision_model = str(payload["default_model"]).strip() or current.vision_model
         current.dpi = max(72, min(int(current.dpi), 600))
         current.max_image_dim = max(512, min(int(current.max_image_dim), 4096))
-        current.num_ctx = max(1024, min(int(current.num_ctx), 32768))
+        current.num_ctx = max(1024, min(int(current.num_ctx), 131072))
         if current.theme not in ("auto", "light", "dark"):
             current.theme = "auto"
         current.desktop_notifications = normalize_notification_mode(current.desktop_notifications)
         current.auto_check_updates = bool(current.auto_check_updates)
         current.llm_enabled = bool(current.llm_enabled)
+        current.llm_auto_ctx = bool(current.llm_auto_ctx)
         current.auto_tag_on_ocr = bool(current.auto_tag_on_ocr)
         current.auto_rename_on_ocr = bool(current.auto_rename_on_ocr)
         current.auto_organize_on_ocr = bool(current.auto_organize_on_ocr)
@@ -553,6 +556,14 @@ def create_app(
         masked = mask_settings_for_api(cfg)
         vision_ep = resolve_vision_endpoint(cfg)
         llm_ep = resolve_llm_endpoint(cfg)
+        preview_ep = llm_ep or ProviderEndpoint(
+            provider_id=cfg.llm_provider or "ollama",
+            base_url=effective_base_url(cfg, cfg.llm_provider),
+            api_key="",
+            model=cfg.llm_model or "qwen3:1.7b",
+            num_ctx=cfg.num_ctx,
+            auto_ctx=cfg.llm_auto_ctx,
+        )
         return {
             "registry": list_providers_metadata(),
             "providers": masked["providers"],
@@ -565,8 +576,35 @@ def create_app(
                 "available": llm_ep is not None,
                 "provider": cfg.llm_provider,
                 "model": cfg.llm_model,
+                "auto_ctx": bool(cfg.llm_auto_ctx),
+                "vram_plan": calculate_vram_plan(preview_ep).to_dict(),
             },
         }
+
+    @app.post("/api/llm/vram-estimate")
+    def estimate_llm_vram(payload: dict = Body(default={})) -> dict:
+        cfg = get_settings()
+        pid = str(payload.get("provider") or cfg.llm_provider or "ollama").strip().lower()
+        model = str(payload.get("model") or cfg.llm_model or "qwen3:1.7b").strip()
+        model_size_gb = payload.get("model_size_gb")
+        param_size = str(payload.get("parameter_size") or "").strip()
+        quant = str(payload.get("quantization") or "").strip()
+        probe_ollama = bool(payload.get("probe_ollama", False))
+        ep = ProviderEndpoint(
+            provider_id=pid,
+            base_url=effective_base_url(cfg, pid),
+            api_key=effective_api_key(cfg, pid),
+            model=model,
+            num_ctx=cfg.num_ctx,
+            auto_ctx=bool(payload.get("auto_ctx", cfg.llm_auto_ctx)),
+        )
+        return calculate_vram_plan(
+            ep,
+            model_size_gb=float(model_size_gb) if isinstance(model_size_gb, (int, float)) else None,
+            parameter_size=param_size,
+            quantization=quant,
+            probe_ollama=probe_ollama,
+        ).to_dict()
 
     @app.post("/api/providers/test")
     def probe_provider(payload: dict = Body(...)) -> dict:

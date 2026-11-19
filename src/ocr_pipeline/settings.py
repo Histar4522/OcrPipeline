@@ -85,6 +85,7 @@ class AppSettings:
     llm_enabled: bool = False
     llm_provider: str = "ollama"
     llm_model: str = ""
+    llm_auto_ctx: bool = True
     auto_tag_on_ocr: bool = True
     auto_rename_on_ocr: bool = False
     auto_organize_on_ocr: bool = False
@@ -116,6 +117,7 @@ class AppSettings:
         self.desktop_notifications = normalize_notification_mode(self.desktop_notifications)
         self.auto_check_updates = bool(self.auto_check_updates)
         self.llm_enabled = bool(self.llm_enabled)
+        self.llm_auto_ctx = bool(self.llm_auto_ctx)
         self.auto_tag_on_ocr = bool(self.auto_tag_on_ocr)
         self.auto_rename_on_ocr = bool(self.auto_rename_on_ocr)
         self.auto_organize_on_ocr = bool(self.auto_organize_on_ocr)
@@ -161,6 +163,7 @@ def resolve_vision_endpoint(
         model=chosen_model,
         num_ctx=settings.num_ctx,
         timeout_seconds=timeout_seconds,
+        auto_ctx=settings.llm_auto_ctx,
     )
 
 
@@ -181,6 +184,7 @@ def resolve_llm_endpoint(
         model=settings.llm_model.strip(),
         num_ctx=settings.num_ctx,
         timeout_seconds=timeout_seconds,
+        auto_ctx=settings.llm_auto_ctx,
     )
 
 

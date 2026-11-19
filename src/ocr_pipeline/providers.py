@@ -48,6 +48,7 @@ class ProviderEndpoint:
     num_ctx: int = 4096
     timeout_seconds: float = 180.0
     max_retries: int = 2
+    auto_ctx: bool = True
 
 
 PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
