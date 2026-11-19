@@ -61,13 +61,18 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
     el("updateLastChecked").textContent = data.checked_at ? `Last checked: ${data.checked_at}` : "";
 
     const badge = el("updateStatusBadge");
+    const sideBadge = el("sideUpdateBadge");
     const navBtn = el("navUpdateBtn");
     const newBox = el("newReleaseBox");
 
     if (data.update_available && data.latest) {
       const canInstall = Boolean(data.latest.asset?.download_url);
-      badge.className = "badge text-bg-warning text-dark";
+      badge.className = "badge text-bg-warning text-dark ms-1 align-middle";
       badge.textContent = `Update Available: ${data.latest.tag_name}`;
+      if (sideBadge) {
+        sideBadge.className = "badge text-bg-warning text-dark pref-nav-badge";
+        sideBadge.textContent = "New";
+      }
       navBtn.classList.remove("d-none");
       navBtn.textContent = `Update ${data.latest.tag_name}`;
       setUpdateButtonState({
@@ -82,8 +87,12 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
       el("newReleaseLink").dataset.url = data.latest.html_url || "";
       renderMarkdownContent(el("newReleaseNotes"), data.latest.body || "_No release notes provided._", false);
     } else {
-      badge.className = "badge text-bg-success";
+      badge.className = "badge text-bg-success ms-1 align-middle";
       badge.textContent = "Up to date";
+      if (sideBadge) {
+        sideBadge.className = "badge bg-body-secondary text-body pref-nav-badge";
+        sideBadge.textContent = "OK";
+      }
       navBtn.classList.add("d-none");
       newBox.classList.add("d-none");
       setUpdateButtonState({ enabled: false, label: "Update" });

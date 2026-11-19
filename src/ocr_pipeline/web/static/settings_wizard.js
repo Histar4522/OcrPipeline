@@ -430,8 +430,25 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     toggleWizardShell(false);
   }
 
+  function setSettingsPane(paneId = "settingsGeneralPane") {
+    document.querySelectorAll("#settingsView [data-settings-pane]").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.settingsPane === paneId);
+    });
+    document.querySelectorAll("#settingsView .pref-pane").forEach((pane) => {
+      pane.classList.toggle("d-none", pane.id !== paneId);
+    });
+  }
+
+  document.querySelectorAll("#settingsView [data-settings-pane]").forEach((btn) => {
+    btn.addEventListener("click", () => setSettingsPane(btn.dataset.settingsPane));
+  });
+
   el("openWizardBtn").addEventListener("click", openWizard);
+  el("aboutOpenWizardBtn")?.addEventListener("click", openWizard);
   el("settingsOpenModelsBtn").addEventListener("click", () => {
+    if (onOpenModels) onOpenModels("visualConfigPane");
+  });
+  el("aboutOpenModelsBtn")?.addEventListener("click", () => {
     if (onOpenModels) onOpenModels("visualConfigPane");
   });
   el("wizExitBtn").addEventListener("click", closeWizard);
@@ -595,5 +612,5 @@ export function initSettingsAndWizard({ showToast, onSettingsSaved, onWizardFini
     showToast("Settings Saved", "Configuration updated.", "success");
   });
 
-  return { loadSettingsForm, openWizard };
+  return { loadSettingsForm, openWizard, setSettingsPane };
 }

@@ -438,7 +438,7 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
     if (!data.online) {
       tbody.innerHTML = '<tr><td colspan="5" class="text-muted p-3">Local Ollama service is offline.</td></tr>';
     } else if (!data.detailed?.length) {
-      tbody.innerHTML = '<tr><td colspan="5" class="text-muted p-3">No models installed yet. Pull one from the right panel.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" class="text-muted p-3">No models installed yet. Pull one below.</td></tr>';
     } else {
       tbody.innerHTML = "";
       for (const m of data.detailed) {
@@ -452,9 +452,9 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td class="fw-semibold"></td>
-          <td>${m.parameter_size || "-"}</td>
-          <td>${m.quantization_level || "-"}</td>
-          <td>${m.size_gb} GB</td>
+          <td class="text-nowrap">${m.parameter_size || "-"}</td>
+          <td class="text-nowrap">${m.quantization_level || "-"}</td>
+          <td class="text-nowrap">${m.size_gb} GB</td>
           <td class="text-end text-nowrap">
             <button class="btn btn-xs ${isVis ? "btn-primary" : "btn-outline-primary"} me-1 set-vis-btn" type="button"></button>
             <button class="btn btn-xs ${isLlm ? "btn-info" : "btn-outline-secondary"} me-1 set-llm-btn" type="button"></button>

@@ -104,8 +104,9 @@ function applyNavPill(pillEl, rolePrefix, roleState, okClass) {
   const label = roleState?.label || "(Unconfigured)";
   const status = roleState?.status || "ok";
   const statusText = roleState?.status_text || "";
-  pillEl.textContent = statusText ? `${rolePrefix}: ${label} [${statusText}]` : `${rolePrefix}: ${label}`;
-  pillEl.title = roleState?.message || `${rolePrefix}: ${label}`;
+  const fullText = statusText ? `${rolePrefix}: ${label} [${statusText}]` : `${rolePrefix}: ${label}`;
+  pillEl.textContent = fullText;
+  pillEl.title = roleState?.message ? `${fullText} — ${roleState.message}` : fullText;
 
   let cls = okClass;
   if (status === "connecting") cls = "nav-pill-connecting";
@@ -604,7 +605,7 @@ const updatesView = initUpdatesView({
   showToast,
   onOpenUpdateSection: () => {
     switchView("settingsView");
-    el("settingsUpdateCard")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    settingsWizard.setSettingsPane("settingsUpdateCard");
   },
 });
 
