@@ -23,7 +23,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
-from .artifacts import format_frontmatter, normalize_tags
+from .artifacts import format_frontmatter, normalize_tags, update_artifact_tags
 from .config import OcrConfig
 from .discovery import DocumentTask
 from .ollama_client import JobCancelledError
@@ -468,21 +468,20 @@ def run_pipeline(
                 separator = "\n\n---\n\n"
                 body = separator.join(page_outputs) + "\n"
                 cleaned_tags = normalize_tags(list(config.tags))
-                if config.obsidian_mode or cleaned_tags:
+                if config.obsidian_mode:
                     meta: dict[str, object] = {
                         "title": task.output_path.stem,
                         "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
                         "source": task.display_name,
                         "model": config.model,
+                        "ocr_pipeline": True,
                     }
-                    if cleaned_tags:
-                        meta["tags"] = cleaned_tags
-                    if config.obsidian_mode:
-                        meta["ocr_pipeline"] = True
                     final_content = format_frontmatter(meta, body)
                 else:
                     final_content = body
                 task.output_path.write_text(final_content, encoding="utf-8")
+                if cleaned_tags:
+                    update_artifact_tags(task.output_path, cleaned_tags)
                 summary.processed_docs += 1
                 doc_elapsed = time.perf_counter() - doc_start
                 avg_ocr = sum(doc_ocr_durations) / len(doc_ocr_durations) if doc_ocr_durations else 0.0

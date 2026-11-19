@@ -217,6 +217,7 @@ def test_settings_and_artifact_management(tmp_path: Path) -> None:
 
     deleted = client.delete("/api/artifacts", params={"path": "Physics/Optics/renamed_note.md"})
     assert deleted.status_code == 200
+    assert not (archive_dir / "Physics" / "Optics" / "renamed_note.md.meta").exists()
     empty_del = client.delete("/api/artifacts/folder", params={"folder": "Physics", "recursive": "true"})
     assert empty_del.status_code == 200
     assert client.get("/api/artifacts").json()["artifacts"] == []
@@ -261,11 +262,17 @@ def test_job_naming_folder_tags_obsidian_and_eta(tmp_path: Path) -> None:
     assert job_data["eta_seconds"] == 0.0
     assert job_data["elapsed_seconds"] >= 0.0
 
-    md_text = (tmp_path / "archive" / "Math" / "Notes" / "Calculus_Week1.md").read_text(encoding="utf-8")
+    md_path = tmp_path / "archive" / "Math" / "Notes" / "Calculus_Week1.md"
+    md_text = md_path.read_text(encoding="utf-8")
     assert 'title: "Calculus_Week1"' in md_text
     assert "ocr_pipeline: true" in md_text
-    assert "  - calculus" in md_text
+    assert "tags:" not in md_text
+    assert "summary:" not in md_text
     assert "Integral calculus notes" in md_text
+    meta_path = tmp_path / "archive" / "Math" / "Notes" / "Calculus_Week1.md.meta"
+    assert meta_path.is_file()
+    import json
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["tags"] == ["calculus", "handwritten"]
     # Ensure internal cache and logs stay in work_dir, keeping archive_dir clean
     assert not (tmp_path / "archive" / "Math" / "Notes" / "ocr_pipeline.log").exists()
     assert not (tmp_path / "archive" / "Math" / "Notes" / ".ocr_cache").exists()
@@ -681,6 +688,10 @@ def test_providers_endpoints_and_ai_artifact_gating(tmp_path: Path, monkeypatch:
     sum_res = client.post("/api/artifacts/ai/summarize", json={"path": "note.md"})
     assert sum_res.status_code == 200
     assert sum_res.json()["summary"] == "Covers eigenvalues cleanly."
+    note_raw = note.read_text(encoding="utf-8")
+    assert "tags:" not in note_raw
+    assert "summary:" not in note_raw
+    assert (archive_dir / "note.md.meta").is_file()
 
     clean_res = client.post("/api/artifacts/ai/cleanup", json={"path": "note.md"})
     assert clean_res.status_code == 200
@@ -711,6 +722,13 @@ def test_providers_endpoints_and_ai_artifact_gating(tmp_path: Path, monkeypatch:
     assert apply_res.status_code == 200
     assert apply_res.json()["applied"] == 1
     assert (archive_dir / "Math" / "Linear_Algebra_Notes.md").is_file()
+    moved_meta = archive_dir / "Math" / "Linear_Algebra_Notes.md.meta"
+    assert moved_meta.is_file()
+    assert not (archive_dir / "note.md.meta").exists()
+    assert json.loads(moved_meta.read_text(encoding="utf-8"))["summary"] == "Covers eigenvalues cleanly."
+    # Verify summary & tag search indexes sidecar metadata cleanly
+    found = client.get("/api/artifacts", params={"q": "eigenvalues cleanly"})
+    assert [a["path"] for a in found.json()["artifacts"]] == ["Math/Linear_Algebra_Notes.md"]
 
 
 def test_post_ocr_llm_automation_and_nonfatal_error(tmp_path: Path, monkeypatch: object) -> None:
@@ -762,10 +780,17 @@ def test_post_ocr_llm_automation_and_nonfatal_error(tmp_path: Path, monkeypatch:
 
     assert job_data["status"] == "completed"
     moved_file = archive_dir / "Biology" / "Cellular_Respiration.md"
+    moved_meta = archive_dir / "Biology" / "Cellular_Respiration.md.meta"
     assert moved_file.is_file()
+    assert moved_meta.is_file()
     content = moved_file.read_text(encoding="utf-8")
-    assert "biology" in content
-    assert "Explains ATP synthesis" in content
+    # Tags and summaries must live in the .meta JSON sidecar, not inside Markdown
+    assert "tags:" not in content
+    assert "Explains ATP synthesis" not in content
+    import json
+    meta_json = json.loads(moved_meta.read_text(encoding="utf-8"))
+    assert meta_json["tags"] == ["biology", "atp"]
+    assert meta_json["summary"] == "Explains ATP synthesis in mitochondria."
     assert job_data["files"] == ["Biology/Cellular_Respiration.md"]
     assert client.get(f"/api/jobs/{job_id}/files/Biology/Cellular_Respiration.md").status_code == 200
     assert client.get(f"/api/jobs/{job_id}/download-all").status_code == 200

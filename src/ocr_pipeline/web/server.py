@@ -24,8 +24,10 @@ from rich.console import Console
 from . import __name__ as _pkg  # noqa: F401
 from .. import __version__, get_display_version
 from ..artifacts import (
+    delete_artifact_sidecar,
     delete_folder,
     ensure_obsidian_vault,
+    move_artifact_sidecar,
     normalize_tags,
     rename_folder,
     sanitize_rel_folder,
@@ -386,6 +388,7 @@ def create_app(
                     dst_dir.mkdir(parents=True, exist_ok=True)
                     final_path = _unique_output_path(dst_dir / dst_name)
                     md_path.rename(final_path)
+                    move_artifact_sidecar(md_path, final_path)
                     with lock:
                         state.expected_files[idx] = final_path.resolve()
 
@@ -896,6 +899,7 @@ def create_app(
         if dst != src and dst.exists():
             raise HTTPException(status_code=409, detail="An artifact with that name already exists there.")
         src.rename(dst)
+        move_artifact_sidecar(src, dst)
         return {"ok": True, "path": dst.relative_to(archive_dir).as_posix()}
 
     @app.patch("/api/artifacts/tags")
@@ -934,6 +938,7 @@ def create_app(
         if not target.is_file():
             raise HTTPException(status_code=404, detail="Artifact not found.")
         target.unlink()
+        delete_artifact_sidecar(target)
         return {"ok": True}
 
     @app.post("/api/artifacts/reveal")
@@ -1110,6 +1115,7 @@ def create_app(
                         dst_dir.mkdir(parents=True, exist_ok=True)
                         dst = _unique_output_path((dst_dir / raw_name).resolve())
                         src.rename(dst)
+                        move_artifact_sidecar(src, dst)
                 applied += 1
             except Exception as exc:
                 errors.append(f"{rel}: {exc}")

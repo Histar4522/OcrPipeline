@@ -1,4 +1,4 @@
-"""Artifact indexing, YAML frontmatter tagging, folder management, and Obsidian vault helpers."""
+"""Artifact indexing, sidecar metadata (.md.meta) tagging/summaries, folder management, and Obsidian vault helpers."""
 
 from datetime import datetime
 import json
@@ -110,32 +110,90 @@ def extract_tags(text: str) -> list[str]:
     return found
 
 
-def update_artifact_tags(file_path: Path, tags: list[str]) -> list[str]:
-    """Update the YAML frontmatter tags of a Markdown artifact on disk."""
+def artifact_meta_path(file_path: Path) -> Path:
+    """Return the companion JSON sidecar metadata path (`<file.md>.meta`)."""
+    return file_path.with_name(f"{file_path.name}.meta")
+
+
+def read_artifact_meta(file_path: Path) -> dict[str, object]:
+    """Read companion `.meta` JSON sidecar if present, returning `{}` otherwise."""
+    meta_path = artifact_meta_path(file_path)
+    if not meta_path.is_file():
+        return {}
+    try:
+        loaded = json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
+        return loaded if isinstance(loaded, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_artifact_meta(file_path: Path, meta: dict[str, object]) -> Path | None:
+    """Persist companion `.meta` JSON sidecar, or remove it when completely empty."""
+    meta_path = artifact_meta_path(file_path)
+    if not meta:
+        meta_path.unlink(missing_ok=True)
+        return None
+    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return meta_path
+
+
+def move_artifact_sidecar(src_md: Path, dst_md: Path) -> None:
+    """Move companion `.meta` file alongside a renamed or moved Markdown artifact."""
+    src_meta = artifact_meta_path(src_md)
+    dst_meta = artifact_meta_path(dst_md)
+    if src_meta == dst_meta:
+        return
+    if src_meta.is_file():
+        dst_meta.parent.mkdir(parents=True, exist_ok=True)
+        src_meta.replace(dst_meta)
+
+
+def delete_artifact_sidecar(file_path: Path) -> None:
+    """Remove companion `.meta` sidecar if present when deleting a Markdown artifact."""
+    artifact_meta_path(file_path).unlink(missing_ok=True)
+
+
+def _strip_legacy_frontmatter_keys(file_path: Path, keys: tuple[str, ...]) -> None:
+    """Remove legacy `tags`/`summary` YAML keys if previously injected into the Markdown file."""
     text = file_path.read_text(encoding="utf-8", errors="replace")
-    meta, body = parse_frontmatter(text)
+    fm_meta, body = parse_frontmatter(text)
+    changed = False
+    for k in keys:
+        if k in fm_meta:
+            fm_meta.pop(k, None)
+            changed = True
+    if changed:
+        file_path.write_text(format_frontmatter(fm_meta, body), encoding="utf-8")
+
+
+def update_artifact_tags(file_path: Path, tags: list[str]) -> list[str]:
+    """Store tags in `<file.md>.meta` JSON without injecting YAML frontmatter into Markdown."""
+    raw_text = file_path.read_text(encoding="utf-8", errors="replace")
+    _, body = parse_frontmatter(raw_text)
+    meta = read_artifact_meta(file_path)
     cleaned = normalize_tags(tags)
     if cleaned:
         meta["tags"] = cleaned
     elif _INLINE_TAG_RE.search(body):
-        # Keep explicit empty frontmatter list so inline #tags in body don't reappear after clearing
+        # Keep explicit empty list in sidecar so inline #tags in body stay suppressed without editing .md
         meta["tags"] = []
     else:
         meta.pop("tags", None)
-    file_path.write_text(format_frontmatter(meta, body), encoding="utf-8")
+    write_artifact_meta(file_path, meta)
+    _strip_legacy_frontmatter_keys(file_path, ("tags",))
     return cleaned
 
 
 def update_artifact_summary(file_path: Path, summary: str) -> str:
-    """Update or remove the YAML frontmatter summary field on a Markdown artifact."""
-    text = file_path.read_text(encoding="utf-8", errors="replace")
-    meta, body = parse_frontmatter(text)
+    """Store document summary in `<file.md>.meta` JSON without modifying Markdown content."""
+    meta = read_artifact_meta(file_path)
     cleaned = " ".join(summary.strip().split())
     if cleaned:
         meta["summary"] = cleaned
     else:
         meta.pop("summary", None)
-    file_path.write_text(format_frontmatter(meta, body), encoding="utf-8")
+    write_artifact_meta(file_path, meta)
+    _strip_legacy_frontmatter_keys(file_path, ("summary",))
     return cleaned
 
 
@@ -250,8 +308,14 @@ def scan_artifacts(
                     folder_doc_counts[key] = folder_doc_counts.get(key, 0) + 1
 
             raw_text = md_file.read_text(encoding="utf-8", errors="replace")
-            meta, body = parse_frontmatter(raw_text)
-            doc_tags = extract_tags(raw_text)
+            fm_meta, body = parse_frontmatter(raw_text)
+            sidecar = read_artifact_meta(md_file)
+            if "tags" in sidecar:
+                raw_sidecar_tags = sidecar.get("tags")
+                doc_tags = normalize_tags(raw_sidecar_tags if isinstance(raw_sidecar_tags, (list, str)) else [])
+            else:
+                doc_tags = extract_tags(raw_text)
+            doc_summary = str(sidecar.get("summary") or fm_meta.get("summary") or "")
             for t in doc_tags:
                 tag_counts[t] = tag_counts.get(t, 0) + 1
 
@@ -263,7 +327,7 @@ def scan_artifacts(
             if tag_filter and tag_filter not in [t.lower() for t in doc_tags]:
                 continue
             if q_lower:
-                haystack = f"{rel_path}\n{' '.join(doc_tags)}\n{raw_text}".lower()
+                haystack = f"{rel_path}\n{' '.join(doc_tags)}\n{doc_summary}\n{raw_text}".lower()
                 if q_lower not in haystack:
                     continue
 
@@ -273,9 +337,9 @@ def scan_artifacts(
                     "path": rel_path,
                     "folder": rel_folder,
                     "name": md_file.name,
-                    "title": str(meta.get("title") or md_file.stem),
+                    "title": str(sidecar.get("title") or fm_meta.get("title") or md_file.stem),
                     "tags": doc_tags,
-                    "summary": str(meta.get("summary") or ""),
+                    "summary": doc_summary,
                     "size_bytes": stat.st_size,
                     "mtime": stat.st_mtime,
                     "modified_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
