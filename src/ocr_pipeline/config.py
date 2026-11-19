@@ -11,7 +11,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "2. Use Markdown headings (#, ##), bullet/numbered lists, and Markdown tables where appropriate.\n"
     "3. For non-text graphics, diagrams, charts, sketches, or stamps, insert a concise inline "
     "placeholder in the format `[Figure: brief description of visual content]`.\n"
-    "4. Output ONLY the transcribed Markdown content—no preamble, commentary, or closing remarks."
+    "4. Output ONLY clean transcribed Markdown—no preamble, commentary, bounding boxes, coordinate tags, or reference markup."
 )
 
 DEFAULT_USER_PROMPT = "Transcribe all text and describe any figures on this page in Markdown."

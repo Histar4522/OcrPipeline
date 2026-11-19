@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import threading
@@ -262,6 +263,128 @@ _TIMING_KEYS = (
     "done_reason",
 )
 
+_LAYOUT_REF_LABELS: frozenset[str] = frozenset(
+    {
+        "title",
+        "sub_title",
+        "subtitle",
+        "section_header",
+        "text",
+        "plain_text",
+        "paragraph",
+        "equation",
+        "equation_number",
+        "formula",
+        "table",
+        "table_caption",
+        "table_footnote",
+        "image",
+        "image_caption",
+        "image_footnote",
+        "figure",
+        "figure_caption",
+        "caption",
+        "header",
+        "footer",
+        "page_header",
+        "page_footer",
+        "page_number",
+        "page_footnote",
+        "footnote",
+        "list",
+        "list_item",
+        "code",
+        "reference",
+        "abstract",
+        "author",
+    }
+)
+
+_RE_THINK_BLOCK = re.compile(r"<(?:think|thought)>.*?</(?:think|thought)>", re.DOTALL | re.IGNORECASE)
+_RE_DEEPSEEK_REF_TAG = re.compile(
+    r"(?P<prefix>^[ \t]*)?<[|｜]ref[|｜]>(?P<label>.*?)<[|｜]/ref[|｜]>"
+    r"(?:\s*<[|｜](?:box|det)[|｜]>.*?<[|｜]/(?:box|det)[|｜]>)?[ \t]*",
+    re.DOTALL | re.MULTILINE,
+)
+_RE_DEEPSEEK_BOX_STANDALONE = re.compile(
+    r"<[|｜](?:box|det)[|｜]>.*?<[|｜]/(?:box|det)[|｜]>[ \t]*",
+    re.DOTALL,
+)
+_RE_QWEN_OBJ_REF = re.compile(r"<\|object_ref_start\|>(.*?)<\|object_ref_end\|>", re.DOTALL)
+_RE_QWEN_BOX = re.compile(r"<\|(?:box|quad)_start\|>.*?<\|(?:box|quad)_end\|>[ \t]*", re.DOTALL)
+_RE_XML_REF_BOX = re.compile(r"<ref>(.*?)</ref>\s*<box>[\d,\s()\[\].;-]+</box>[ \t]*", re.DOTALL)
+_RE_XML_BOX_ONLY = re.compile(r"<box>[\d,\s()\[\].;-]+</box>[ \t]*", re.DOTALL)
+_RE_GLM_BOX = re.compile(r"<\|begin_of_box\|>.*?<\|end_of_box\|>[ \t]*", re.DOTALL)
+_RE_LOC_TOKEN = re.compile(r"<[|｜]?loc_?\d+[|｜]?>")
+_RE_STRAY_VLM_TOKENS = re.compile(
+    r"<[|｜]/?(?:"
+    r"grounding|ref|det|box|image|vision_start|vision_end|image_pad|video_pad|"
+    r"object_ref_start|object_ref_end|box_start|box_end|quad_start|quad_end|"
+    r"begin_of_box|end_of_box|endoftext|im_start|im_end|eot_id|end_of_text|"
+    r"begin_of_text|user|assistant|observation|end▁of▁sentence|begin▁of▁sentence|eos|bos"
+    r")[|｜]>|<end_of_turn>",
+    re.IGNORECASE,
+)
+_RE_OUTER_MD_FENCE = re.compile(r"^```(?:markdown|md)[ \t]*\r?\n(.*?)\r?\n```$", re.DOTALL | re.IGNORECASE)
+_RE_EXCESS_NEWLINES = re.compile(r"\n{3,}")
+
+
+def clean_ocr_output(text: str) -> str:
+    """Strip VLM grounding, bounding-box, reference, and control tokens into clean Markdown."""
+    if not text:
+        return ""
+
+    # 1. Strip hidden reasoning blocks emitted by thinking VLMs
+    cleaned = _RE_THINK_BLOCK.sub("", text)
+
+    # 2. Strip/unwrap DeepSeek <｜ref｜>...<｜/ref｜><｜box｜|det｜>...<｜/box｜|det｜> grounding marks
+    def _replace_ref(match: re.Match[str]) -> str:
+        prefix = match.group("prefix")
+        at_line_start = prefix is not None
+        leading = prefix or ""
+        label_raw = match.group("label").strip()
+        label_norm = label_raw.lower()
+        after = match.string[match.end() :]
+        next_ch = after[0] if after else ""
+
+        if label_norm in _LAYOUT_REF_LABELS:
+            if at_line_start and next_ch and next_ch not in " \t\r\n#":
+                if label_norm == "title":
+                    return f"{leading}# "
+                if label_norm in ("sub_title", "subtitle", "section_header"):
+                    return f"{leading}## "
+            return leading
+
+        needs_space = bool(
+            match.group(0).endswith((" ", "\t")) and next_ch and next_ch not in " \t\r\n"
+        )
+        return f"{leading}{label_raw}{' ' if needs_space else ''}"
+
+    cleaned = _RE_DEEPSEEK_REF_TAG.sub(_replace_ref, cleaned)
+
+    # 3. Strip remaining provider-specific box / ref / loc tokens
+    cleaned = _RE_DEEPSEEK_BOX_STANDALONE.sub("", cleaned)
+    cleaned = _RE_QWEN_OBJ_REF.sub(r"\1", cleaned)
+    cleaned = _RE_QWEN_BOX.sub("", cleaned)
+    cleaned = _RE_XML_REF_BOX.sub(r"\1", cleaned)
+    cleaned = _RE_XML_BOX_ONLY.sub("", cleaned)
+    cleaned = _RE_GLM_BOX.sub("", cleaned)
+    cleaned = _RE_LOC_TOKEN.sub("", cleaned)
+
+    # 4. Strip stray known VLM control tokens (leaving LaTeX/physics like <|psi|> untouched)
+    cleaned = _RE_STRAY_VLM_TOKENS.sub("", cleaned)
+
+    # 5. Unwrap a single outer ```markdown ... ``` fence if the whole response was wrapped
+    cleaned = cleaned.strip()
+    fence_match = _RE_OUTER_MD_FENCE.match(cleaned)
+    if fence_match and "```" not in fence_match.group(1):
+        cleaned = fence_match.group(1)
+
+    # 6. Normalize trailing spaces and excessive blank lines
+    cleaned = "\n".join(line.rstrip() for line in cleaned.splitlines())
+    cleaned = _RE_EXCESS_NEWLINES.sub("\n\n", cleaned)
+    return cleaned.strip()
+
 
 def ocr_image_b64(
     image_b64: str,
@@ -301,7 +424,7 @@ def ocr_image_b64(
                         if key in data:
                             metrics_out[key] = data[key]
                 content = data.get("message", {}).get("content", "") if isinstance(data, dict) else ""
-                return str(content).strip()
+                return clean_ocr_output(str(content))
             except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                 if cancel_event is not None and cancel_event.is_set():
                     raise JobCancelledError("Cancelled by user.") from exc

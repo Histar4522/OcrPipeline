@@ -15,6 +15,7 @@ from ocr_pipeline.providers import (
     chat_text,
     check_endpoint_ready,
     classify_http_error,
+    clean_ocr_output,
     probe_endpoint_status,
     test_provider_connection as probe_provider_connection,
     vision_ocr_image_b64,
@@ -193,8 +194,8 @@ def test_deepseek_ocr_tool_and_flash_vision() -> None:
                     "object": "ocr.result",
                     "page_count": 2,
                     "pages": [
-                        {"index": 1, "text": "Second block", "finish_reason": "stop"},
-                        {"index": 0, "text": "First block", "finish_reason": "stop"},
+                        {"index": 1, "text": "<｜ref｜>text<｜/ref｜><｜box｜>[[10,20,30,40]]<｜/box｜> Second block", "finish_reason": "stop"},
+                        {"index": 0, "text": "<｜ref｜>sub_title<｜/ref｜><｜box｜>[[1,2,3,4]]<｜/box｜> First block", "finish_reason": "stop"},
                     ],
                     "usage": {"input_tokens": 120, "output_tokens": 45},
                 },
@@ -214,7 +215,7 @@ def test_deepseek_ocr_tool_and_flash_vision() -> None:
             client=client,
             metrics_out=metrics,
         )
-        assert out1 == "First block\n\nSecond block"
+        assert out1 == "## First block\n\nSecond block"
         assert metrics["prompt_eval_count"] == 120
         assert metrics["eval_count"] == 45
 
@@ -225,7 +226,7 @@ def test_deepseek_ocr_tool_and_flash_vision() -> None:
             "usr",
             client=client,
         )
-        assert out2 == "First block\n\nSecond block"
+        assert out2 == "## First block\n\nSecond block"
 
         out_flash = vision_ocr_image_b64(
             png_raw,
@@ -406,3 +407,48 @@ def test_openai_qwen_google_anthropic_quirks(monkeypatch: object) -> None:
     )  # type: ignore[attr-defined]
     xai_list = probe_provider_connection("xai", "", "xk-test")
     assert xai_list["models"] == ["grok-4.7"]
+
+
+def test_clean_ocr_output_strips_provider_reference_and_box_marks() -> None:
+    # DeepSeek /v1/tools/ocr fullwidth <｜ref｜>/<｜box｜> output matching user sample
+    ds_raw = (
+        "<｜ref｜>sub_title<｜/ref｜><｜box｜>[[291,88,821,138]]<｜/box｜> Balanced Chemical Equations \n"
+        "<｜ref｜>equation<｜/ref｜><｜box｜>[[114,138,856,287]]<｜/box｜> $$\n"
+        "6CO_2 + 6H_2O \\rightarrow C_6H_{12}O_6 + 6O_2\n"
+        "$$\n"
+        "<｜ref｜>text<｜/ref｜><｜box｜>[[114,287,221,309]]<｜/box｜> Bicarbonate "
+    )
+    ds_clean = clean_ocr_output(ds_raw)
+    assert "<｜ref｜>" not in ds_clean
+    assert "<｜box｜>" not in ds_clean
+    assert ds_clean.startswith("## Balanced Chemical Equations\n$$")
+    assert "$$" in ds_clean and ds_clean.endswith("Bicarbonate")
+
+    # DeepSeek-OCR already-headed sub_title should not double `##`
+    assert clean_ocr_output("<|ref|>sub_title<|/ref|><|det|>[[10,20,30,40]]<|/det|> ## Existing Heading") == "## Existing Heading"
+    assert clean_ocr_output("<|ref|>title<|/ref|><|det|>[[10,20,30,40]]<|/det|> Document Title") == "# Document Title"
+
+    # DeepSeek-OCR span-grounding mode keeps inner wrapped text and removes box coords
+    span_raw = "<|ref|>The perils of vibe coding<|/ref|><|det|>[[352,30,624,111]]<|/det|> details here"
+    assert clean_ocr_output(span_raw) == "The perils of vibe coding details here"
+
+    # Qwen-VL tokens (object_ref_start / box_start / XML ref+box / im_end)
+    qwen_raw = (
+        "<|object_ref_start|>Invoice<|object_ref_end|><|box_start|>(10,20),(300,80)<|box_end|>\n"
+        "<ref>Total</ref><box>[[1, 2, 3, 4]]</box><|im_end|>"
+    )
+    assert clean_ocr_output(qwen_raw) == "Invoice\nTotal"
+
+    # GLM-OCR box, loc tokens, <think>, and outer ```markdown fence unwrapping
+    fenced_raw = (
+        "<think>internal reasoning</think>\n"
+        "```markdown\n"
+        "<|begin_of_box|>[[10,20,30,40]]<|end_of_box|><loc0123># Clean Title\n"
+        "Line a < x and y > z\n"
+        "```"
+    )
+    assert clean_ocr_output(fenced_raw) == "# Clean Title\nLine a < x and y > z"
+
+    # Preserve physics/math notation (<|psi|>) and legitimate code blocks inside a page
+    safe_raw = "State $|\\psi\\rangle$ or `<|psi|>` stays.\n\n```python\nprint('hi')\n```"
+    assert clean_ocr_output(safe_raw) == safe_raw

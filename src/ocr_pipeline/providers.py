@@ -15,6 +15,7 @@ from .ollama_client import (
     JobCancelledError,
     ProviderError,
     check_ollama_ready,
+    clean_ocr_output,
     find_ollama_executable,
     list_models_detailed,
     ocr_image_b64,
@@ -609,12 +610,14 @@ def vision_ocr_image_b64(
     if spec.id == "deepseek":
         model_lower = endpoint.model.strip().lower()
         if model_lower in DEEPSEEK_OCR_TOOL_MODELS:
-            return _send_deepseek_ocr(
-                image_b64,
-                endpoint,
-                client=client,
-                cancel_event=cancel_event,
-                metrics_out=metrics_out,
+            return clean_ocr_output(
+                _send_deepseek_ocr(
+                    image_b64,
+                    endpoint,
+                    client=client,
+                    cancel_event=cancel_event,
+                    metrics_out=metrics_out,
+                )
             )
         if model_lower in DEEPSEEK_TEXT_ONLY_MODELS:
             raise ProviderError(
@@ -649,7 +652,9 @@ def vision_ocr_image_b64(
                     ],
                 }
             )
-        return _send_openai_compat(endpoint, messages, temperature=0.0, client=client, cancel_event=cancel_event)
+        return clean_ocr_output(
+            _send_openai_compat(endpoint, messages, temperature=0.0, client=client, cancel_event=cancel_event)
+        )
 
     if spec.protocol == "anthropic":
         content = [
@@ -659,8 +664,10 @@ def vision_ocr_image_b64(
             },
             {"type": "text", "text": user_prompt},
         ]
-        return _send_anthropic(
-            endpoint, system_prompt, content, temperature=0.0, client=client, cancel_event=cancel_event
+        return clean_ocr_output(
+            _send_anthropic(
+                endpoint, system_prompt, content, temperature=0.0, client=client, cancel_event=cancel_event
+            )
         )
 
     if spec.protocol == "google":
@@ -668,7 +675,9 @@ def vision_ocr_image_b64(
             {"text": user_prompt},
             {"inlineData": {"mimeType": "image/png", "data": image_b64}},
         ]
-        return _send_google(endpoint, system_prompt, parts, temperature=0.0, client=client, cancel_event=cancel_event)
+        return clean_ocr_output(
+            _send_google(endpoint, system_prompt, parts, temperature=0.0, client=client, cancel_event=cancel_event)
+        )
 
     raise ProviderError(f"Unsupported protocol '{spec.protocol}'.")
 
