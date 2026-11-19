@@ -41,5 +41,5 @@ class OcrConfig:
     def __post_init__(self) -> None:
         if not self.base_url and self.ollama_url:
             self.base_url = self.ollama_url
-        if self.provider == "ollama" and self.base_url:
+        if self.provider in ("ollama", "ollama_local") and self.base_url:
             self.ollama_url = self.base_url

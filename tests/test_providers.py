@@ -13,6 +13,8 @@ from ocr_pipeline.providers import (
     ProviderEndpoint,
     chat_text,
     check_endpoint_ready,
+    classify_http_error,
+    probe_endpoint_status,
     test_provider_connection as probe_provider_connection,
     vision_ocr_image_b64,
     vision_ocr_with_config,
@@ -20,9 +22,22 @@ from ocr_pipeline.providers import (
 
 
 def test_provider_registry_covers_expected_providers() -> None:
-    expected = {"ollama", "llama_cpp", "openai", "anthropic", "google", "deepseek", "xai", "qwen", "custom"}
+    expected = {
+        "ollama_local",
+        "ollama",
+        "llama_cpp",
+        "openai",
+        "anthropic",
+        "google",
+        "deepseek",
+        "xai",
+        "qwen",
+        "custom",
+    }
     assert expected.issubset(PROVIDER_REGISTRY.keys())
-    assert PROVIDER_REGISTRY["deepseek"].supports_vision is False
+    assert PROVIDER_REGISTRY["ollama_local"].singleton is True
+    assert PROVIDER_REGISTRY["deepseek"].supports_vision is True
+    assert "deepseek-ocr" in PROVIDER_REGISTRY["deepseek"].suggested_vision_models
     assert PROVIDER_REGISTRY["deepseek"].supports_llm is True
     assert PROVIDER_REGISTRY["ollama"].is_local is True
     assert PROVIDER_REGISTRY["llama_cpp"].is_local is True
@@ -117,15 +132,19 @@ def test_chat_text_json_mode_across_protocols() -> None:
 
 
 def test_connection_checks_and_validation(monkeypatch: object) -> None:
-    with pytest.raises(ProviderError, match="does not support Vision"):
-        check_endpoint_ready(
-            ProviderEndpoint("deepseek", "https://api.deepseek.com/v1", "dk", "deepseek-chat"),
-            require_vision=True,
-        )
+    # DeepSeek OCR is accepted as a Vision OCR endpoint when API key & model are set
+    check_endpoint_ready(
+        ProviderEndpoint("deepseek", "https://api.deepseek.com/v1", "dk", "deepseek-ocr"),
+        require_vision=True,
+    )
+    assert classify_http_error(429, "rate limit exceeded") == "out_of_quota"
+    assert classify_http_error(402, "insufficient quota") == "out_of_quota"
+    assert classify_http_error(401, "unauthorized") == "invalid_key"
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # type: ignore[attr-defined]
     res = probe_provider_connection("openai", "", "")
     assert res["online"] is False
+    assert res["status_code"] == "no_key"
     assert "API key" in res["message"]
 
     monkeypatch.setenv("OPENAI_API_KEY", "env-key-123")  # type: ignore[attr-defined]
@@ -137,4 +156,21 @@ def test_connection_checks_and_validation(monkeypatch: object) -> None:
     )  # type: ignore[attr-defined]
     ok = probe_provider_connection("openai", "", "")
     assert ok["online"] is True
+    assert ok["status_code"] == "ok"
+    assert ok["status_text"] == ""
     assert ok["models"] == ["gpt-4.1-mini", "gpt-4o"]
+
+    # Quota exhaustion surfaced cleanly by probe_endpoint_status
+    monkeypatch.setattr(
+        "ocr_pipeline.providers.httpx.get",
+        lambda *a, **k: httpx.Response(
+            429, json={"error": {"message": "You exceeded your current quota"}}, request=httpx.Request("GET", "https://api.deepseek.com/v1/models")
+        ),
+    )  # type: ignore[attr-defined]
+    quota_res = probe_endpoint_status(ProviderEndpoint("deepseek", "https://api.deepseek.com/v1", "dk", "deepseek-ocr"))
+    assert quota_res["status"] == "out_of_quota"
+    assert quota_res["status_text"] == "Out of Quota"
+
+    disabled_res = probe_endpoint_status(ProviderEndpoint("ollama_local", "http://localhost:11434", "", "glm-ocr"), enabled=False)
+    assert disabled_res["status"] == "disabled"
+    assert disabled_res["status_text"] == "Disabled"

@@ -10,6 +10,7 @@ import {
   fetchJobs,
   fetchModels,
   fetchProviders,
+  fetchProviderStatus,
   fetchSettings,
   fileDownloadUrl,
   pullModel,
@@ -20,6 +21,7 @@ import {
 import { initArtifactsView } from "./artifacts.js";
 import { bsPrompt, triggerDownload } from "./dialogs.js";
 import { renderMarkdownContent } from "./markdown.js";
+import { CUSTOM_MODEL_VALUE, populateRoleModelSelect, readRoleModelChoice } from "./model_dropdown.js";
 import { initProvidersAndModelsView } from "./providers_ui.js";
 import { initSettingsAndWizard } from "./settings_wizard.js";
 import { createTagInput } from "./tag_input.js";
@@ -29,7 +31,9 @@ const state = {
   selectedFiles: [],
   pulledModels: [],
   providerRegistry: [],
-  providerConfigs: {},
+  credentials: [],
+  discoveredByCred: {},
+  localOllamaStatus: null,
   ollamaOnline: false,
   ollamaInstalled: false,
   lastSettings: null,
@@ -80,11 +84,43 @@ function showToast(title, body, variant = "primary") {
   toast.show();
 }
 
+function currentJobChoice() {
+  return readRoleModelChoice({
+    selectEl: el("jobVisualModelSelect"),
+    customCredEl: el("jobCustomCredSelect"),
+    customInputEl: el("jobCustomModelInput"),
+    credentials: state.credentials,
+  });
+}
+
+function applyNavPill(pillEl, rolePrefix, roleState, okClass) {
+  if (!pillEl) return;
+  if (rolePrefix === "LLM" && roleState && !roleState.enabled) {
+    pillEl.className = "nav-model-pill nav-pill-disabled";
+    pillEl.textContent = "LLM: Disabled";
+    pillEl.title = "Assistant LLM disabled — click to configure";
+    return;
+  }
+  const label = roleState?.label || "(Unconfigured)";
+  const status = roleState?.status || "ok";
+  const statusText = roleState?.status_text || "";
+  pillEl.textContent = statusText ? `${rolePrefix}: ${label} [${statusText}]` : `${rolePrefix}: ${label}`;
+  pillEl.title = roleState?.message || `${rolePrefix}: ${label}`;
+
+  let cls = okClass;
+  if (status === "connecting") cls = "nav-pill-connecting";
+  else if (["no_key", "no_url", "model_missing", "disabled"].includes(status)) cls = "nav-pill-warn";
+  else if (["offline", "invalid_key", "out_of_quota", "error"].includes(status)) cls = "nav-pill-error";
+  pillEl.className = `nav-model-pill ${cls}`;
+}
+
 function updatePullButton() {
-  const pid = el("jobProviderSelect").value || "ollama";
-  const selected = el("modelSelect").value.trim();
-  const pulled = state.pulledModels.includes(selected) || state.pulledModels.includes(`${selected}:latest`);
-  el("pullModelBtn").classList.toggle("d-none", pid !== "ollama" || !selected || pulled);
+  const choice = currentJobChoice();
+  const spec = state.providerRegistry.find((r) => r.id === choice.provider);
+  const isOllama = spec?.protocol === "ollama";
+  const known = state.discoveredByCred[choice.credentialId] || [];
+  const pulled = known.includes(choice.model) || known.includes(`${choice.model}:latest`);
+  el("pullModelBtn").classList.toggle("d-none", !isOllama || !choice.model || pulled);
 }
 
 function setNewJobAvailability({ status, installed = false, message = "" }) {
@@ -112,110 +148,114 @@ function setNewJobAvailability({ status, installed = false, message = "" }) {
     msg.textContent =
       message ||
       (installed
-        ? "Ollama is installed but offline. Start Ollama or switch Vision provider."
-        : "Vision provider needs configuration in Providers & Models.");
+        ? "Ollama Local is installed but offline. Start Ollama or switch Visual Model."
+        : "Visual provider needs configuration in Providers & Models.");
     quickStart.classList.toggle("d-none", !installed);
   }
 }
 
 function refreshJobProviderState() {
-  const pid = el("jobProviderSelect").value || "ollama";
-  const spec = state.providerRegistry.find((r) => r.id === pid);
-  const cfg = state.providerConfigs[pid] || {};
-  const badge = el("ollamaBadge");
+  el("jobCustomModelPanel").classList.toggle("d-none", el("jobVisualModelSelect").value !== CUSTOM_MODEL_VALUE);
+  const choice = currentJobChoice();
+  const cred = state.credentials.find((c) => c.id === choice.credentialId);
+  const spec = state.providerRegistry.find((r) => r.id === choice.provider);
 
-  if (pid === "ollama") {
+  if (!cred || cred.enabled === false) {
+    setNewJobAvailability({
+      status: "offline",
+      installed: false,
+      message: cred ? `Credential "${cred.name}" is disabled. Enable it in Providers & Models.` : "Select a Visual credential.",
+    });
+  } else if (cred.id === "cred_ollama_local" || choice.provider === "ollama_local") {
     if (state.ollamaOnline) {
-      badge.className = "badge text-bg-success";
-      badge.textContent = `Ollama (${state.pulledModels.length})`;
       setNewJobAvailability({ status: "online" });
     } else {
-      badge.className = "badge text-bg-danger";
-      badge.textContent = "Ollama Offline";
       setNewJobAvailability({ status: "offline", installed: state.ollamaInstalled });
     }
-  } else if (spec?.requires_api_key && !cfg.has_key) {
-    badge.className = "badge text-bg-warning text-dark";
-    badge.textContent = `${spec.label} (No Key)`;
+  } else if (spec?.requires_api_key && !cred.has_key) {
     setNewJobAvailability({
       status: "offline",
       installed: false,
-      message: `${spec.label} API key missing. Configure in Providers & Models or set ${spec.env_var}.`,
+      message: `${cred.name} API key missing. Configure in Providers & Models or set ${spec.env_var}.`,
     });
-  } else if (pid === "custom" && !cfg.base_url) {
-    badge.className = "badge text-bg-warning text-dark";
-    badge.textContent = "Custom (No URL)";
+  } else if (choice.provider === "custom" && !cred.base_url) {
     setNewJobAvailability({
       status: "offline",
       installed: false,
-      message: "Custom Base URL missing. Configure in Providers & Models.",
+      message: `${cred.name} Base URL missing. Configure in Providers & Models.`,
     });
   } else {
-    badge.className = "badge text-bg-success";
-    badge.textContent = spec ? spec.label : pid;
     setNewJobAvailability({ status: "online" });
-  }
-
-  const dl = el("jobModelDatalist");
-  const suggested = spec?.suggested_vision_models || [];
-  const options =
-    pid === "ollama"
-      ? [...new Set([state.lastSettings?.vision_model, ...suggested, ...state.pulledModels].filter(Boolean))]
-      : [...new Set([state.lastSettings?.vision_model, ...suggested].filter(Boolean))];
-  dl.innerHTML = "";
-  for (const m of options) {
-    const opt = document.createElement("option");
-    opt.value = m;
-    dl.appendChild(opt);
-  }
-  if (!el("modelSelect").value.trim() && options.length) {
-    el("modelSelect").value = options[0];
   }
   updatePullButton();
 }
 
-async function syncSettingsToJobForm() {
-  const badge = el("ollamaBadge");
-  badge.className = "badge text-bg-secondary";
-  badge.textContent = "Checking provider...";
+async function syncSettingsToJobForm(forceRefresh = false) {
+  const visPill = el("navVisualBadge");
+  const llmPill = el("navLlmBadge");
+  const prevVisLabel = state.lastSettings?.vision_model
+    ? `${state.lastSettings.vision_model} (${state.credentials.find((c) => c.id === state.lastSettings.vision_credential_id)?.name || "Provider"})`
+    : "…";
+  applyNavPill(visPill, "Visual", { label: prevVisLabel, status: "connecting", status_text: "Connecting" }, "nav-pill-visual-ok");
+  if (state.lastSettings?.llm_enabled && state.lastSettings?.llm_model) {
+    const lCred = state.credentials.find((c) => c.id === state.lastSettings.llm_credential_id)?.name || "Provider";
+    applyNavPill(llmPill, "LLM", { enabled: true, label: `${state.lastSettings.llm_model} (${lCred})`, status: "connecting", status_text: "Connecting" }, "nav-pill-llm-ok");
+  }
   setNewJobAvailability({ status: "connecting" });
 
   let provData;
   let modelsData;
   let settings;
+  let statusData;
   try {
-    [provData, modelsData, settings] = await Promise.all([fetchProviders(), fetchModels(), fetchSettings()]);
+    [provData, modelsData, settings, statusData] = await Promise.all([
+      fetchProviders(),
+      fetchModels(),
+      fetchSettings(),
+      fetchProviderStatus(forceRefresh),
+    ]);
   } catch {
-    badge.className = "badge text-bg-danger";
-    badge.textContent = "Provider Offline";
+    applyNavPill(visPill, "Visual", { label: prevVisLabel, status: "offline", status_text: "Offline", message: "Backend unreachable" }, "nav-pill-visual-ok");
     setNewJobAvailability({ status: "offline", installed: false });
     return;
   }
 
   state.providerRegistry = provData.registry || [];
-  state.providerConfigs = provData.providers || {};
-  state.pulledModels = modelsData.models || [];
-  state.ollamaOnline = Boolean(modelsData.online);
-  state.ollamaInstalled = Boolean(modelsData.installed);
+  state.credentials = provData.credentials || [];
+  state.localOllamaStatus = statusData?.ollama_local || null;
+  state.pulledModels = statusData?.ollama_local?.models || modelsData.models || [];
+  state.ollamaOnline = Boolean(statusData?.ollama_local?.online ?? modelsData.online);
+  state.ollamaInstalled = Boolean(statusData?.ollama_local?.installed ?? modelsData.installed);
   state.lastSettings = settings;
-
-  const provSel = el("jobProviderSelect");
-  provSel.innerHTML = "";
-  for (const spec of state.providerRegistry) {
-    if (spec.supports_vision) provSel.add(new Option(spec.label, spec.id));
+  if (state.pulledModels.length) {
+    state.discoveredByCred["cred_ollama_local"] = state.pulledModels;
   }
-  provSel.value = settings.vision_provider || "ollama";
-  el("modelSelect").value = settings.vision_model || settings.default_model || "glm-ocr";
+
+  populateRoleModelSelect({
+    selectEl: el("jobVisualModelSelect"),
+    customPanelEl: el("jobCustomModelPanel"),
+    customCredEl: el("jobCustomCredSelect"),
+    customInputEl: el("jobCustomModelInput"),
+    credentials: state.credentials,
+    registry: state.providerRegistry,
+    discoveredByCred: state.discoveredByCred,
+    role: "vision",
+    current: {
+      credentialId: settings.vision_credential_id || "cred_ollama_local",
+      model: settings.vision_model || settings.default_model || "glm-ocr",
+      custom: Boolean(settings.vision_custom_model),
+    },
+  });
+
   el("dpiInput").value = settings.dpi;
   el("maxDimInput").value = settings.max_image_dim;
   applyTheme(settings.theme || "auto");
 
-  const llmOn = Boolean(settings.llm_available);
-  const llmBadge = el("llmStatusBadge");
-  llmBadge.classList.toggle("d-none", !llmOn);
-  if (llmOn) llmBadge.textContent = `LLM: ${settings.llm_model}`;
+  applyNavPill(visPill, "Visual", statusData.vision, "nav-pill-visual-ok");
+  applyNavPill(llmPill, "LLM", statusData.llm, "nav-pill-llm-ok");
 
-  el("jobAiStatusHint").textContent = llmOn ? `${settings.llm_provider} / ${settings.llm_model}` : "Optional LLM not configured";
+  const llmOn = Boolean(settings.llm_available);
+  el("jobAiStatusHint").textContent = llmOn ? statusData.llm?.label || settings.llm_model : "Optional LLM disabled";
   for (const [id, val] of [
     ["jobAutoTag", settings.auto_tag_on_ocr],
     ["jobAutoSummarize", settings.auto_summarize_on_ocr],
@@ -550,11 +590,15 @@ async function syncJobArchiveOptions(selectFolder = null) {
 
 const artifactsView = initArtifactsView({ showToast, onArchiveChanged: () => syncJobArchiveOptions() });
 const jobTagEditor = createTagInput(el("jobTagsContainer"), { placeholder: "Add tag and press Enter..." });
-const modelsView = initProvidersAndModelsView({ showToast, onProvidersChanged: syncSettingsToJobForm });
+const modelsView = initProvidersAndModelsView({ showToast, onProvidersChanged: () => syncSettingsToJobForm(true) });
 const settingsWizard = initSettingsAndWizard({
   showToast,
-  onSettingsSaved: syncSettingsToJobForm,
+  onSettingsSaved: () => syncSettingsToJobForm(true),
   onWizardFinished: () => switchView("jobsView"),
+  onOpenModels: (paneId = "visualConfigPane") => {
+    switchView("modelsView");
+    modelsView.setPane(paneId);
+  },
 });
 const updatesView = initUpdatesView({
   showToast,
@@ -583,43 +627,49 @@ document.querySelectorAll("#mainNav [data-view]").forEach((btn) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
 });
 
-el("navRefreshBtn").addEventListener("click", syncSettingsToJobForm);
-el("quickSettingsBtn").addEventListener("click", () => switchView("settingsView"));
+el("navVisualBadge").addEventListener("click", () => {
+  switchView("modelsView");
+  modelsView.setPane("visualConfigPane");
+});
+el("navLlmBadge").addEventListener("click", () => {
+  switchView("modelsView");
+  modelsView.setPane("llmConfigPane");
+});
+el("navRefreshBtn").addEventListener("click", () => syncSettingsToJobForm(true));
+el("quickSettingsBtn").addEventListener("click", () => {
+  switchView("modelsView");
+  modelsView.setPane("visualConfigPane");
+});
 el("quickStartOllamaBtn").addEventListener("click", async () => {
   const btn = el("quickStartOllamaBtn");
   btn.disabled = true;
   btn.textContent = "Starting...";
-  el("ollamaLockMsg").textContent = "Starting Ollama service (this may take a few seconds)...";
+  el("ollamaLockMsg").textContent = "Starting Ollama Local service (this may take a few seconds)...";
   try {
     const res = await startOllama();
-    showToast("Ollama", res.message, res.online ? "success" : "warning");
-    await syncSettingsToJobForm();
+    showToast("Ollama Local", res.message, res.online ? "success" : "warning");
+    await syncSettingsToJobForm(true);
   } catch (err) {
-    showToast("Ollama", err.message, "danger");
+    showToast("Ollama Local", err.message, "danger");
   } finally {
     btn.disabled = false;
     btn.textContent = "Start Ollama";
   }
 });
 
-el("jobProviderSelect").addEventListener("change", () => {
-  const pid = el("jobProviderSelect").value;
-  const spec = state.providerRegistry.find((r) => r.id === pid);
-  if (spec?.suggested_vision_models?.length) {
-    el("modelSelect").value = spec.suggested_vision_models[0];
-  }
-  refreshJobProviderState();
-});
-el("modelSelect").addEventListener("input", updatePullButton);
-el("modelSelect").addEventListener("change", updatePullButton);
+el("jobVisualModelSelect").addEventListener("change", refreshJobProviderState);
+el("jobCustomCredSelect").addEventListener("change", refreshJobProviderState);
+el("jobCustomModelInput").addEventListener("input", updatePullButton);
 el("pullModelBtn").addEventListener("click", async () => {
+  const choice = currentJobChoice();
+  if (!choice.model) return;
   const btn = el("pullModelBtn");
   btn.disabled = true;
   btn.textContent = "Pulling...";
   try {
-    await pullModel(el("modelSelect").value);
-    await syncSettingsToJobForm();
-    showToast("Model Ready", `${el("modelSelect").value} installed.`, "success");
+    await pullModel(choice.model, choice.credentialId);
+    await syncSettingsToJobForm(true);
+    showToast("Model Ready", `${choice.model} (${choice.credentialName}) installed.`, "success");
   } catch (err) {
     showToast("Pull Failed", err.message, "danger");
   } finally {
@@ -739,8 +789,15 @@ el("jobForm").addEventListener("submit", async (e) => {
   fd.append("job_name", el("jobNameInput").value);
   fd.append("folder", el("jobFolderSelect").value);
   fd.append("tags", jobTagEditor.getTags().join(","));
-  fd.append("provider", el("jobProviderSelect").value);
-  fd.append("model", el("modelSelect").value);
+  const choice = currentJobChoice();
+  if (!choice.model) {
+    errEl.textContent = "Please select or enter a Visual OCR model.";
+    errEl.classList.remove("d-none");
+    return;
+  }
+  fd.append("credential_id", choice.credentialId);
+  fd.append("provider", choice.provider);
+  fd.append("model", choice.model);
   fd.append("dpi", el("dpiInput").value);
   fd.append("max_dim", el("maxDimInput").value);
   fd.append("series_mode", String(el("seriesSwitch").checked));

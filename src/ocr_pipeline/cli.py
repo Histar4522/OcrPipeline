@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.app:
         from .desktop import launch_desktop_app
 
-        return launch_desktop_app(ollama_url=args.base_url if args.provider == "ollama" else None)
+        return launch_desktop_app(ollama_url=args.base_url if args.provider in ("ollama", "ollama_local") else None)
 
     if args.server:
         return _launch_server(args, console)
@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         provider=args.provider,
         base_url=resolved_url,
         api_key=resolved_key,
-        ollama_url=resolved_url if args.provider == "ollama" else "http://localhost:11434",
+        ollama_url=resolved_url if args.provider in ("ollama", "ollama_local") else "http://localhost:11434",
         dpi=args.dpi,
         max_image_dim=args.max_dim,
         timeout_seconds=args.timeout,

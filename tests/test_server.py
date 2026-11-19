@@ -45,6 +45,8 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert 'id="wizardModal"' not in home.text
     assert 'id="setAutoUpdate"' not in home.text
     for elem_id in (
+        "navVisualBadge",
+        "navLlmBadge",
         "selectFilesBtn",
         "selectFolderBtn",
         "clearSelectedFilesBtn",
@@ -56,15 +58,22 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
         "releaseHistorySelect",
         "newReleaseNotes",
         "releaseHistoryPreview",
-        "jobProviderSelect",
+        "jobVisualModelSelect",
         "jobAiOptionsBox",
         "artifactAiBtn",
         "aiFolderSummaryBtn",
-        "roleVisionProvider",
+        "visualConfigPane",
+        "llmConfigPane",
+        "credentialsPane",
+        "localOllamaPane",
+        "visualModelSelect",
+        "llmModelSelect",
         "roleLlmEnabled",
+        "addCredentialBtn",
+        "credOllamaLocalToggle",
     ):
         assert f'id="{elem_id}"' in home.text
-    for removed_id in ("aiOrganizeFolderBtn", "artifactMoveBtn", "aiOrganizeBtn", "aiOrganizeModal"):
+    for removed_id in ("aiOrganizeFolderBtn", "artifactMoveBtn", "aiOrganizeBtn", "aiOrganizeModal", "setOllamaUrl", "setDefaultModel"):
         assert f'id="{removed_id}"' not in home.text
     for val in ("always", "not_in_focus", "minimized", "never"):
         assert f'value="{val}"' in home.text
@@ -91,6 +100,7 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
         "/static/tag_input.js",
         "/static/updates.js",
         "/static/providers_ui.js",
+        "/static/model_dropdown.js",
     ):
         js = client.get(asset)
         assert js.status_code == 200
@@ -812,3 +822,82 @@ def test_server_vram_estimate_endpoint(tmp_path: Path) -> None:
     assert est_cloud.status_code == 200
     assert est_cloud.json()["is_local"] is False
     assert est_cloud.json()["vram_at_recommended_gb"] == 0.0
+
+
+def test_credentials_crud_and_provider_status(tmp_path: Path) -> None:
+    seen_providers: list[str] = []
+
+    def fake_ocr(image_b64: str, cfg: OcrConfig, client: object) -> str:
+        seen_providers.append(f"{cfg.provider}@{cfg.base_url}")
+        return "# OCR Output"
+
+    client = _make_test_app(tmp_path, ocr_fn=fake_ocr)
+
+    # Create two custom credentials: DeepSeek (with Vision OCR) and a second Ollama instance
+    c1 = client.post(
+        "/api/credentials",
+        json={"name": "DeepSeek Account", "provider": "deepseek", "api_key": "sk-ds-test"},
+    )
+    assert c1.status_code == 200
+    assert c1.json()["api_key"] == "••••••••"
+    ds_id = c1.json()["id"]
+
+    c2 = client.post(
+        "/api/credentials",
+        json={"name": "Ollama Garage Server", "provider": "ollama", "base_url": "http://192.168.1.99:11434"},
+    )
+    assert c2.status_code == 200
+    garage_id = c2.json()["id"]
+
+    # Unique credential names & singleton Ollama Local are enforced
+    dup = client.post(
+        "/api/credentials",
+        json={"name": "ollama garage server", "provider": "ollama", "base_url": "http://10.0.0.1:11434"},
+    )
+    assert dup.status_code == 409
+    dup_local = client.post(
+        "/api/credentials",
+        json={"name": "Another Local", "provider": "ollama_local"},
+    )
+    assert dup_local.status_code == 400
+    assert client.delete("/api/credentials/cred_ollama_local").status_code == 400
+
+    # Status endpoint reports offline/disabled accurately cleanly
+    client.put(
+        "/api/settings",
+        json={
+            "vision_credential_id": "cred_ollama_local",
+            "vision_model": "glm-ocr",
+            "llm_enabled": False,
+        },
+    )
+    st1 = client.get("/api/providers/status")
+    assert st1.status_code == 200
+    assert st1.json()["vision"]["label"] == "glm-ocr (Ollama Local)"
+    assert st1.json()["vision"]["status"] == "offline"
+    assert st1.json()["vision"]["status_text"] == "Offline"
+    assert st1.json()["llm"]["label"] == "Disabled"
+
+    # Toggle Ollama Local off and confirm status reflects Disabled
+    toggled = client.put("/api/credentials/cred_ollama_local", json={"provider": "ollama_local", "enabled": False})
+    assert toggled.status_code == 200
+    assert toggled.json()["enabled"] is False
+    st2 = client.get("/api/providers/status")
+    assert st2.json()["vision"]["status"] == "disabled"
+    assert st2.json()["vision"]["status_text"] == "Disabled"
+
+    # Route a job explicitly to DeepSeek credential by credential_id
+    job = client.post(
+        "/api/jobs",
+        data={"source_mode": "upload", "credential_id": ds_id, "model": "deepseek-ocr"},
+        files=[("files", ("p1.png", _png_bytes(), "image/png"))],
+    )
+    assert job.status_code == 200
+    job_id = job.json()["job_id"]
+    deadline = time.time() + 4.0
+    while client.get(f"/api/jobs/{job_id}").json()["status"] not in ("completed", "failed") and time.time() < deadline:
+        time.sleep(0.05)
+    assert seen_providers == ["deepseek@https://api.deepseek.com/v1"]
+
+    # Deleting Garage Server credential succeeds cleanly
+    assert client.delete(f"/api/credentials/{garage_id}").status_code == 200

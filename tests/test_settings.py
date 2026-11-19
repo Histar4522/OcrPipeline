@@ -124,7 +124,8 @@ def test_legacy_settings_migration_and_api_key_masking(tmp_path: Path, monkeypat
         encoding="utf-8",
     )
     migrated = load_settings(cfg_path)
-    assert migrated.vision_provider == "ollama"
+    assert migrated.vision_provider in ("ollama", "ollama_local")
+    assert migrated.vision_credential_id == "cred_ollama_local"
     assert migrated.vision_model == "deepseek-ocr"
     assert migrated.providers["ollama"]["base_url"] == "http://10.0.0.5:11434"
     assert resolve_llm_endpoint(migrated) is None
@@ -150,3 +151,62 @@ def test_legacy_settings_migration_and_api_key_masking(tmp_path: Path, monkeypat
     llm_ep = resolve_llm_endpoint(migrated)
     assert llm_ep is not None and llm_ep.model == "qwen3:1.7b"
     assert resolve_vision_endpoint(migrated).provider_id == "openai"
+
+
+def test_multi_credentials_unique_names_and_singleton_local(tmp_path: Path) -> None:
+    import pytest
+    from ocr_pipeline.settings import (
+        DuplicateCredentialError,
+        MASKED_SECRET,
+        OLLAMA_LOCAL_CRED_ID,
+        delete_credential,
+        mask_settings_for_api,
+        resolve_llm_endpoint,
+        resolve_vision_endpoint,
+        upsert_credential,
+    )
+
+    s = AppSettings(archive_dir=str(tmp_path / "archive"))
+    garage = upsert_credential(
+        s,
+        {"name": "Ollama Garage Server", "provider": "ollama", "base_url": "http://192.168.1.50:11434"},
+    )
+    ds = upsert_credential(
+        s,
+        {"name": "DeepSeek Primary", "provider": "deepseek", "api_key": "sk-ds-123"},
+    )
+
+    # Duplicate credential names (case-insensitive) and duplicate ollama_local must fail
+    with pytest.raises(DuplicateCredentialError):
+        upsert_credential(s, {"name": "ollama garage server", "provider": "ollama", "base_url": "http://10.0.0.2:11434"})
+    with pytest.raises(ValueError, match="already exists"):
+        upsert_credential(s, {"name": "Second Local", "provider": "ollama_local"})
+
+    s.vision_credential_id = str(garage["id"])
+    s.vision_provider = "ollama"
+    s.vision_model = "glm-ocr"
+    vis = resolve_vision_endpoint(s)
+    assert vis.base_url == "http://192.168.1.50:11434"
+    assert vis.credential_name == "Ollama Garage Server"
+
+    s.llm_enabled = True
+    s.llm_credential_id = str(ds["id"])
+    s.llm_provider = "deepseek"
+    s.llm_model = "deepseek-chat"
+    llm = resolve_llm_endpoint(s)
+    assert llm is not None and llm.api_key == "sk-ds-123" and llm.credential_name == "DeepSeek Primary"
+
+    masked = mask_settings_for_api(s)
+    ds_masked = next(c for c in masked["credentials"] if c["id"] == ds["id"])
+    assert ds_masked["api_key"] == MASKED_SECRET
+
+    # Disabling Ollama Local works; deleting Ollama Local is blocked
+    upsert_credential(s, {"enabled": False}, cred_id=OLLAMA_LOCAL_CRED_ID)
+    assert any(c["id"] == OLLAMA_LOCAL_CRED_ID and c["enabled"] is False for c in s.credentials)
+    with pytest.raises(ValueError, match="cannot be deleted"):
+        delete_credential(s, OLLAMA_LOCAL_CRED_ID)
+
+    # Deleting active LLM credential cleans up role binding safely
+    delete_credential(s, str(ds["id"]))
+    assert s.llm_enabled is False
+    assert s.llm_credential_id == OLLAMA_LOCAL_CRED_ID

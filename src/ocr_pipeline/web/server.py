@@ -59,25 +59,34 @@ from ..ollama_client import (
 )
 from ..platform_utils import generate_app_icon_image, get_system_info, open_in_file_manager
 from ..providers import (
+    PROVIDER_REGISTRY,
     ProviderEndpoint,
+    STATUS_LABELS,
     check_endpoint_ready,
+    classify_exception_status,
     list_providers_metadata,
+    probe_endpoint_status,
     test_provider_connection,
     vision_ocr_with_config,
 )
 from ..runner import OcrFn, ProgressEvent, run_pipeline
 from ..settings import (
     AppSettings,
+    DuplicateCredentialError,
+    OLLAMA_LOCAL_CRED_ID,
     apply_provider_updates,
     default_jobs_dir,
+    delete_credential,
     effective_api_key,
     effective_base_url,
+    find_credential,
     load_settings,
     mask_settings_for_api,
     normalize_notification_mode,
     resolve_llm_endpoint,
     resolve_vision_endpoint,
     save_settings,
+    upsert_credential,
 )
 from ..updater import UpdateError, download_and_install_update, fetch_github_releases
 
@@ -318,12 +327,50 @@ def create_app(
         "path": "",
     }
     effective_ocr_fn: OcrFn = ocr_fn or vision_ocr_with_config
+    runtime_role_status: dict[str, dict[str, str]] = {}
+
+    def _record_role_error(role: str, credential_id: str, exc: Exception) -> None:
+        code = classify_exception_status(exc)
+        with lock:
+            runtime_role_status[role] = {
+                "credential_id": credential_id,
+                "status": code,
+                "status_text": STATUS_LABELS.get(code, "Error"),
+                "message": str(exc),
+            }
+
+    def _clear_role_error(role: str | None = None) -> None:
+        with lock:
+            if role is None:
+                runtime_role_status.clear()
+            else:
+                runtime_role_status.pop(role, None)
+
+    def _display_label(model: str, cred_name: str) -> str:
+        clean_model = model.strip() or "(unset)"
+        return f"{clean_model} ({cred_name})" if cred_name else clean_model
+
+    def _resolve_ollama_url_for_cred(cfg: AppSettings, credential_id: str | None = None) -> str:
+        cid = (credential_id or "").strip() or OLLAMA_LOCAL_CRED_ID
+        cred = find_credential(cfg, cid)
+        if cred is None:
+            if cid == OLLAMA_LOCAL_CRED_ID:
+                return cfg.ollama_url
+            raise HTTPException(status_code=404, detail="Ollama credential not found.")
+        spec = PROVIDER_REGISTRY.get(str(cred.get("provider") or ""))
+        if spec is None or spec.protocol != "ollama":
+            raise HTTPException(status_code=400, detail="Selected credential is not an Ollama endpoint.")
+        return str(cred.get("base_url") or cfg.ollama_url or spec.default_base_url).strip()
 
     def get_settings() -> AppSettings:
         cfg = load_settings(settings_path)
         if ollama_url:
             cfg.ollama_url = ollama_url
             cfg.providers["ollama"]["base_url"] = ollama_url
+            cfg.providers["ollama_local"]["base_url"] = ollama_url
+            local_cred = find_credential(cfg, OLLAMA_LOCAL_CRED_ID)
+            if local_cred is not None:
+                local_cred["base_url"] = ollama_url
         return cfg
 
     def _append_job_log(state: JobState, line: str) -> None:
@@ -382,7 +429,9 @@ def create_app(
                     state,
                     f"LLM POST ({llm_endpoint.provider_id}/{llm_endpoint.model}): {md_path.name} -> {state._rel_path(final_path)} tags={res['tags']}",
                 )
+                _clear_role_error("llm")
             except Exception as exc:
+                _record_role_error("llm", llm_endpoint.credential_id, exc)
                 _append_job_log(state, f"LLM WARN ({md_path.name}): {exc}")
 
     def _execute_job(state: JobState, tasks: list[DocumentTask], config: OcrConfig) -> None:
@@ -430,7 +479,11 @@ def create_app(
                 state.skipped_docs = summary.skipped_docs
                 state.failed_pages = summary.failed_pages
                 state.status = "cancelled" if summary.cancelled else "completed"
+            if not summary.cancelled and summary.processed_docs > 0 and summary.failed_pages == 0:
+                _clear_role_error("vision")
         except Exception as exc:
+            cfg_now = get_settings()
+            _record_role_error("vision", cfg_now.vision_credential_id, exc)
             with lock:
                 state.active_client = None
                 if state.cancel_event.is_set():
@@ -512,7 +565,38 @@ def create_app(
             if key in payload and key != "providers":
                 setattr(current, key, payload[key])
         if "ollama_url" in payload and "providers" not in payload:
-            current.providers["ollama"]["base_url"] = str(payload["ollama_url"]).strip()
+            new_url = str(payload["ollama_url"]).strip()
+            current.providers["ollama"]["base_url"] = new_url
+            current.providers["ollama_local"]["base_url"] = new_url
+            local_cred = find_credential(current, OLLAMA_LOCAL_CRED_ID)
+            if local_cred is not None and new_url:
+                local_cred["base_url"] = new_url
+        if "vision_credential_id" in payload:
+            v_cred = find_credential(current, str(payload["vision_credential_id"]))
+            if v_cred is not None:
+                current.vision_credential_id = str(v_cred["id"])
+                current.vision_provider = str(v_cred["provider"])
+        elif "vision_provider" in payload:
+            v_cred = find_credential(current, current.vision_credential_id)
+            if v_cred is None or str(v_cred["provider"]) != str(current.vision_provider):
+                from ..settings import find_credential_for_provider
+
+                matched_v = find_credential_for_provider(current, current.vision_provider)
+                if matched_v is not None:
+                    current.vision_credential_id = str(matched_v["id"])
+        if "llm_credential_id" in payload:
+            l_cred = find_credential(current, str(payload["llm_credential_id"]))
+            if l_cred is not None:
+                current.llm_credential_id = str(l_cred["id"])
+                current.llm_provider = str(l_cred["provider"])
+        elif "llm_provider" in payload:
+            l_cred = find_credential(current, current.llm_credential_id)
+            if l_cred is None or str(l_cred["provider"]) != str(current.llm_provider):
+                from ..settings import find_credential_for_provider
+
+                matched_l = find_credential_for_provider(current, current.llm_provider)
+                if matched_l is not None:
+                    current.llm_credential_id = str(matched_l["id"])
         if "default_model" in payload and "vision_model" not in payload:
             current.vision_model = str(payload["default_model"]).strip() or current.vision_model
         current.dpi = max(72, min(int(current.dpi), 600))
@@ -524,6 +608,8 @@ def create_app(
         current.auto_check_updates = bool(current.auto_check_updates)
         current.llm_enabled = bool(current.llm_enabled)
         current.llm_auto_ctx = bool(current.llm_auto_ctx)
+        current.vision_custom_model = bool(current.vision_custom_model)
+        current.llm_custom_model = bool(current.llm_custom_model)
         current.auto_tag_on_ocr = bool(current.auto_tag_on_ocr)
         current.auto_rename_on_ocr = bool(current.auto_rename_on_ocr)
         current.auto_organize_on_ocr = bool(current.auto_organize_on_ocr)
@@ -535,6 +621,7 @@ def create_app(
         if not current.archive_dir.strip():
             current.archive_dir = str(AppSettings().archive_dir)
         save_settings(current, settings_path)
+        _clear_role_error()
         data = mask_settings_for_api(current)
         data["default_system_prompt"] = DEFAULT_SYSTEM_PROMPT
         return data
@@ -545,35 +632,226 @@ def create_app(
         masked = mask_settings_for_api(cfg)
         vision_ep = resolve_vision_endpoint(cfg)
         llm_ep = resolve_llm_endpoint(cfg)
+        llm_cred = find_credential(cfg, cfg.llm_credential_id)
+        local_cred = find_credential(cfg, OLLAMA_LOCAL_CRED_ID)
         preview_ep = llm_ep or ProviderEndpoint(
-            provider_id=cfg.llm_provider or "ollama",
-            base_url=effective_base_url(cfg, cfg.llm_provider),
+            provider_id=str(llm_cred["provider"]) if llm_cred else (cfg.llm_provider or "ollama_local"),
+            base_url=effective_base_url(cfg, cfg.llm_provider, cfg.llm_credential_id),
             api_key="",
             model=cfg.llm_model or "qwen3:1.7b",
             num_ctx=cfg.num_ctx,
             auto_ctx=cfg.llm_auto_ctx,
+            credential_id=str(llm_cred["id"]) if llm_cred else OLLAMA_LOCAL_CRED_ID,
+            credential_name=str(llm_cred["name"]) if llm_cred else "Ollama Local",
         )
+        llm_cname = str(llm_cred["name"]) if llm_cred else (PROVIDER_REGISTRY.get(cfg.llm_provider, PROVIDER_REGISTRY["ollama_local"]).short_label)
         return {
             "registry": list_providers_metadata(),
+            "credentials": masked["credentials"],
             "providers": masked["providers"],
+            "ollama_local": {
+                "id": OLLAMA_LOCAL_CRED_ID,
+                "enabled": bool(local_cred.get("enabled", True)) if local_cred else True,
+                "base_url": str(local_cred.get("base_url") or cfg.ollama_url) if local_cred else cfg.ollama_url,
+            },
             "vision": {
+                "credential_id": vision_ep.credential_id or cfg.vision_credential_id,
+                "credential_name": vision_ep.credential_name,
                 "provider": vision_ep.provider_id,
                 "model": vision_ep.model,
+                "display_label": _display_label(vision_ep.model, vision_ep.credential_name),
+                "custom": bool(cfg.vision_custom_model),
             },
             "llm": {
                 "enabled": bool(cfg.llm_enabled),
                 "available": llm_ep is not None,
-                "provider": cfg.llm_provider,
+                "credential_id": cfg.llm_credential_id,
+                "credential_name": llm_cname,
+                "provider": str(llm_cred["provider"]) if llm_cred else cfg.llm_provider,
                 "model": cfg.llm_model,
+                "display_label": _display_label(cfg.llm_model, llm_cname) if (cfg.llm_enabled and cfg.llm_model.strip()) else "Disabled",
+                "custom": bool(cfg.llm_custom_model),
                 "auto_ctx": bool(cfg.llm_auto_ctx),
                 "vram_plan": calculate_vram_plan(preview_ep).to_dict(),
             },
         }
 
+    @app.get("/api/providers/status")
+    def get_providers_status(refresh: bool = Query(False)) -> dict:
+        if refresh:
+            _clear_role_error()
+        cfg = get_settings()
+        local_cred = find_credential(cfg, OLLAMA_LOCAL_CRED_ID)
+        local_enabled = bool(local_cred.get("enabled", True)) if local_cred else True
+
+        vision_ep = resolve_vision_endpoint(cfg)
+        vis_cred = find_credential(cfg, vision_ep.credential_id)
+        vis_enabled = bool(vis_cred.get("enabled", True)) if vis_cred else True
+        vis_probe = probe_endpoint_status(vision_ep, enabled=vis_enabled, timeout=3.0)
+
+        # Overlay recent runtime error (e.g. Out of Quota 429 during inference) when /models probe still passed.
+        with lock:
+            rt_vis = dict(runtime_role_status.get("vision") or {})
+            rt_llm = dict(runtime_role_status.get("llm") or {})
+
+        if vis_probe["status"] == "ok" and rt_vis and rt_vis.get("credential_id") == vision_ep.credential_id:
+            vis_probe["status"] = rt_vis["status"]
+            vis_probe["status_text"] = rt_vis["status_text"]
+            vis_probe["message"] = rt_vis.get("message") or vis_probe["message"]
+
+        llm_cred = find_credential(cfg, cfg.llm_credential_id)
+        llm_cname = str(llm_cred["name"]) if llm_cred else "Ollama Local"
+        if not cfg.llm_enabled:
+            llm_info = {
+                "enabled": False,
+                "model": "",
+                "credential_id": cfg.llm_credential_id,
+                "credential_name": llm_cname,
+                "label": "Disabled",
+                "status": "disabled",
+                "status_text": "Disabled",
+                "online": False,
+                "models": [],
+                "message": "Assistant LLM is disabled.",
+            }
+        else:
+            l_enabled = bool(llm_cred.get("enabled", True)) if llm_cred else True
+            if not cfg.llm_model.strip():
+                llm_info = {
+                    "enabled": True,
+                    "model": "",
+                    "credential_id": cfg.llm_credential_id,
+                    "credential_name": llm_cname,
+                    "label": f"(Unset) ({llm_cname})",
+                    "status": "error",
+                    "status_text": "No Model",
+                    "online": False,
+                    "models": [],
+                    "message": "Select an Assistant LLM model.",
+                }
+            else:
+                llm_ep = ProviderEndpoint(
+                    provider_id=str(llm_cred["provider"]) if llm_cred else cfg.llm_provider,
+                    base_url=effective_base_url(cfg, cfg.llm_provider, cfg.llm_credential_id),
+                    api_key=effective_api_key(cfg, cfg.llm_provider, cfg.llm_credential_id),
+                    model=cfg.llm_model.strip(),
+                    num_ctx=cfg.num_ctx,
+                    auto_ctx=cfg.llm_auto_ctx,
+                    credential_id=cfg.llm_credential_id,
+                    credential_name=llm_cname,
+                )
+                if llm_ep.credential_id == vision_ep.credential_id and l_enabled == vis_enabled and vis_probe["status"] != "model_missing":
+                    llm_probe = dict(vis_probe)
+                    spec_l = PROVIDER_REGISTRY.get(llm_ep.provider_id)
+                    if llm_probe["status"] == "ok" and spec_l and spec_l.protocol == "ollama":
+                        names = set(llm_probe.get("models") or [])
+                        if llm_ep.model not in names and f"{llm_ep.model}:latest" not in names:
+                            llm_probe["status"] = "model_missing"
+                            llm_probe["status_text"] = STATUS_LABELS["model_missing"]
+                            llm_probe["online"] = False
+                            llm_probe["message"] = f"Model '{llm_ep.model}' is not pulled on {llm_cname}."
+                else:
+                    llm_probe = probe_endpoint_status(llm_ep, enabled=l_enabled, timeout=3.0)
+
+                if llm_probe["status"] == "ok" and rt_llm and rt_llm.get("credential_id") == cfg.llm_credential_id:
+                    llm_probe["status"] = rt_llm["status"]
+                    llm_probe["status_text"] = rt_llm["status_text"]
+                    llm_probe["message"] = rt_llm.get("message") or llm_probe["message"]
+
+                llm_info = {
+                    "enabled": True,
+                    "model": llm_ep.model,
+                    "credential_id": llm_ep.credential_id,
+                    "credential_name": llm_cname,
+                    "label": _display_label(llm_ep.model, llm_cname),
+                    **llm_probe,
+                }
+
+        # Reuse Ollama Local probe if Vision or LLM already probed cred_ollama_local
+        if vision_ep.credential_id == OLLAMA_LOCAL_CRED_ID:
+            ollama_local_status = {
+                "enabled": local_enabled,
+                "online": bool(vis_probe.get("online")) or vis_probe.get("status") == "model_missing",
+                "installed": bool(vis_probe.get("installed")) or (find_ollama_executable() is not None),
+                "url": str(local_cred.get("base_url") or cfg.ollama_url) if local_cred else cfg.ollama_url,
+                "models": list(vis_probe.get("models") or []),
+                "detailed": list(vis_probe.get("detailed") or []),
+            }
+        else:
+            local_url = str(local_cred.get("base_url") or cfg.ollama_url) if local_cred else cfg.ollama_url
+            local_ep = ProviderEndpoint("ollama_local", local_url, "", "", credential_id=OLLAMA_LOCAL_CRED_ID, credential_name="Ollama Local")
+            lp = probe_endpoint_status(local_ep, enabled=local_enabled, timeout=2.5)
+            ollama_local_status = {
+                "enabled": local_enabled,
+                "online": bool(lp.get("online")),
+                "installed": bool(lp.get("installed")) or (find_ollama_executable() is not None),
+                "url": local_url,
+                "models": list(lp.get("models") or []),
+                "detailed": list(lp.get("detailed") or []),
+            }
+
+        return {
+            "vision": {
+                "provider": vision_ep.provider_id,
+                "model": vision_ep.model,
+                "credential_id": vision_ep.credential_id,
+                "credential_name": vision_ep.credential_name,
+                "label": _display_label(vision_ep.model, vision_ep.credential_name),
+                **vis_probe,
+            },
+            "llm": llm_info,
+            "ollama_local": ollama_local_status,
+        }
+
+    @app.post("/api/credentials")
+    def create_credential_endpoint(payload: dict = Body(...)) -> dict:
+        cfg = get_settings()
+        try:
+            created = upsert_credential(cfg, payload)
+        except DuplicateCredentialError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        save_settings(cfg, settings_path)
+        _clear_role_error()
+        masked = mask_settings_for_api(cfg)["credentials"]
+        return next(c for c in masked if c["id"] == created["id"])
+
+    @app.put("/api/credentials/{cred_id}")
+    def update_credential_endpoint(cred_id: str, payload: dict = Body(...)) -> dict:
+        cfg = get_settings()
+        try:
+            updated = upsert_credential(cfg, payload, cred_id=cred_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DuplicateCredentialError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        save_settings(cfg, settings_path)
+        _clear_role_error()
+        masked = mask_settings_for_api(cfg)["credentials"]
+        return next(c for c in masked if c["id"] == updated["id"])
+
+    @app.delete("/api/credentials/{cred_id}")
+    def delete_credential_endpoint(cred_id: str) -> dict:
+        cfg = get_settings()
+        try:
+            delete_credential(cfg, cred_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        save_settings(cfg, settings_path)
+        _clear_role_error()
+        return {"ok": True, "deleted": cred_id}
+
     @app.post("/api/llm/vram-estimate")
     def estimate_llm_vram(payload: dict = Body(default={})) -> dict:
         cfg = get_settings()
-        pid = str(payload.get("provider") or cfg.llm_provider or "ollama").strip().lower()
+        cid = str(payload.get("credential_id") or "").strip() or None
+        cred = find_credential(cfg, cid) if cid else None
+        pid = str(payload.get("provider") or (cred["provider"] if cred else cfg.llm_provider) or "ollama_local").strip().lower()
         model = str(payload.get("model") or cfg.llm_model or "qwen3:1.7b").strip()
         model_size_gb = payload.get("model_size_gb")
         param_size = str(payload.get("parameter_size") or "").strip()
@@ -581,11 +859,13 @@ def create_app(
         probe_ollama = bool(payload.get("probe_ollama", False))
         ep = ProviderEndpoint(
             provider_id=pid,
-            base_url=effective_base_url(cfg, pid),
-            api_key=effective_api_key(cfg, pid),
+            base_url=effective_base_url(cfg, pid, cid),
+            api_key=effective_api_key(cfg, pid, cid),
             model=model,
             num_ctx=cfg.num_ctx,
             auto_ctx=bool(payload.get("auto_ctx", cfg.llm_auto_ctx)),
+            credential_id=cid or "",
+            credential_name=str(cred["name"]) if cred else "",
         )
         return calculate_vram_plan(
             ep,
@@ -598,14 +878,18 @@ def create_app(
     @app.post("/api/providers/test")
     def probe_provider(payload: dict = Body(...)) -> dict:
         cfg = get_settings()
-        pid = str(payload.get("provider", "ollama")).strip().lower()
-        base_url = str(payload.get("base_url") or effective_base_url(cfg, pid)).strip()
+        cid = str(payload.get("credential_id") or "").strip() or None
+        cred = find_credential(cfg, cid) if cid else None
+        pid = str(payload.get("provider") or (cred["provider"] if cred else "ollama_local")).strip().lower()
+        base_url = str(payload.get("base_url") or effective_base_url(cfg, pid, cid)).strip()
         raw_key = str(payload.get("api_key") or "").strip()
         if raw_key == "••••••••":
             raw_key = ""
-        api_key = raw_key or effective_api_key(cfg, pid)
+        api_key = raw_key or effective_api_key(cfg, pid, cid)
         try:
-            return test_provider_connection(pid, base_url=base_url, api_key=api_key)
+            res = test_provider_connection(pid, base_url=base_url, api_key=api_key)
+            _clear_role_error()
+            return res
         except ProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -675,11 +959,12 @@ def create_app(
             return dict(update_state)
 
     @app.get("/api/models")
-    def list_models() -> dict:
+    def list_models(credential_id: str | None = Query(None)) -> dict:
         cfg = get_settings()
+        target_url = _resolve_ollama_url_for_cred(cfg, credential_id)
         installed = find_ollama_executable() is not None
         try:
-            detailed = list_models_detailed(cfg.ollama_url, timeout=3.0)
+            detailed = list_models_detailed(target_url, timeout=3.0)
             return {
                 "online": True,
                 "installed": True,
@@ -687,7 +972,7 @@ def create_app(
                 "detailed": detailed,
                 "recommended": RECOMMENDED_MODELS,
                 "default_model": cfg.default_model,
-                "ollama_url": cfg.ollama_url,
+                "ollama_url": target_url,
             }
         except httpx.HTTPError as exc:
             return {
@@ -697,7 +982,7 @@ def create_app(
                 "detailed": [],
                 "recommended": RECOMMENDED_MODELS,
                 "default_model": cfg.default_model,
-                "ollama_url": cfg.ollama_url,
+                "ollama_url": target_url,
                 "error": str(exc),
             }
 
@@ -707,20 +992,22 @@ def create_app(
         return start_ollama_service(cfg.ollama_url)
 
     @app.post("/api/models/pull")
-    def pull_ollama_model(model: str = Form(...)) -> dict:
+    def pull_ollama_model(model: str = Form(...), credential_id: str = Form("")) -> dict:
         cfg = get_settings()
+        target_url = _resolve_ollama_url_for_cred(cfg, credential_id)
         target = model.strip()
         if not target:
             raise HTTPException(status_code=400, detail="Model name is required.")
         try:
-            pull_model(cfg.ollama_url, target)
+            pull_model(target_url, target)
             return {"ok": True, "model": target}
         except OllamaError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.post("/api/models/pull-async")
-    def start_model_pull(model: str = Form(...)) -> dict:
+    def start_model_pull(model: str = Form(...), credential_id: str = Form("")) -> dict:
         cfg = get_settings()
+        target_url = _resolve_ollama_url_for_cred(cfg, credential_id)
         target = model.strip()
         if not target:
             raise HTTPException(status_code=400, detail="Model name is required.")
@@ -752,7 +1039,7 @@ def create_app(
 
         def worker() -> None:
             try:
-                pull_model_stream(cfg.ollama_url, target, on_progress=on_progress)
+                pull_model_stream(target_url, target, on_progress=on_progress)
                 with lock:
                     pull_state["active"] = False
                     pull_state["done"] = True
@@ -775,10 +1062,11 @@ def create_app(
             return dict(pull_state)
 
     @app.delete("/api/models/{model_name:path}")
-    def remove_ollama_model(model_name: str) -> dict:
+    def remove_ollama_model(model_name: str, credential_id: str | None = Query(None)) -> dict:
         cfg = get_settings()
+        target_url = _resolve_ollama_url_for_cred(cfg, credential_id)
         try:
-            delete_model(cfg.ollama_url, model_name)
+            delete_model(target_url, model_name)
             return {"ok": True, "deleted": model_name}
         except OllamaError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -947,6 +1235,16 @@ def create_app(
             )
         return cfg, endpoint
 
+    def _run_llm_call(endpoint: object, fn):
+        cid = str(getattr(endpoint, "credential_id", "") or "")
+        try:
+            out = fn()
+            _clear_role_error("llm")
+            return out
+        except (ProviderError, ValueError) as exc:
+            _record_role_error("llm", cid, exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     @app.put("/api/artifacts/content")
     def save_artifact_content(payload: dict = Body(...)) -> dict:
         cfg = get_settings()
@@ -970,10 +1268,7 @@ def create_app(
         index = scan_artifacts(Path(cfg.archive_dir))
         known_tags = [str(t["name"]) for t in (index.get("tags") or [])]
         raw_text = target.read_text(encoding="utf-8", errors="replace")
-        try:
-            tags = suggest_tags(raw_text, known_tags, endpoint)  # type: ignore[arg-type]
-        except (ProviderError, ValueError) as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        tags = _run_llm_call(endpoint, lambda: suggest_tags(raw_text, known_tags, endpoint))  # type: ignore[arg-type]
         if payload.get("apply", True):
             if not tags:
                 raise HTTPException(status_code=502, detail="Assistant LLM returned no valid tags for this document.")
@@ -988,10 +1283,7 @@ def create_app(
         if not target.is_file():
             raise HTTPException(status_code=404, detail="Artifact not found.")
         raw_text = target.read_text(encoding="utf-8", errors="replace")
-        try:
-            suggested = suggest_filename(raw_text, target.name, endpoint)  # type: ignore[arg-type]
-        except (ProviderError, ValueError) as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        suggested = _run_llm_call(endpoint, lambda: suggest_filename(raw_text, target.name, endpoint))  # type: ignore[arg-type]
         return {"ok": True, "suggested_name": suggested}
 
     @app.post("/api/artifacts/ai/summarize")
@@ -1002,10 +1294,7 @@ def create_app(
         if not target.is_file():
             raise HTTPException(status_code=404, detail="Artifact not found.")
         raw_text = target.read_text(encoding="utf-8", errors="replace")
-        try:
-            summary = summarize_document(raw_text, endpoint)  # type: ignore[arg-type]
-        except (ProviderError, ValueError) as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        summary = _run_llm_call(endpoint, lambda: summarize_document(raw_text, endpoint))  # type: ignore[arg-type]
         saved = update_artifact_summary(target, summary)
         return {"ok": True, "summary": saved}
 
@@ -1017,10 +1306,7 @@ def create_app(
         if not target.is_file():
             raise HTTPException(status_code=404, detail="Artifact not found.")
         raw_text = target.read_text(encoding="utf-8", errors="replace")
-        try:
-            cleaned = cleanup_ocr_markdown(raw_text, endpoint)  # type: ignore[arg-type]
-        except (ProviderError, ValueError) as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        cleaned = _run_llm_call(endpoint, lambda: cleanup_ocr_markdown(raw_text, endpoint))  # type: ignore[arg-type]
         return {"ok": True, "original": raw_text, "cleaned_markdown": cleaned}
 
     @app.post("/api/artifacts/ai/folder-summary")
@@ -1029,14 +1315,10 @@ def create_app(
         cwd = sanitize_rel_folder(str(payload.get("cwd", ""))).as_posix()
         if cwd == ".":
             cwd = ""
-        try:
-            result = summarize_folder_contents(
-                Path(cfg.archive_dir),
-                cwd,
-                endpoint,  # type: ignore[arg-type]
-            )
-        except (ProviderError, ValueError) as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        result = _run_llm_call(
+            endpoint,
+            lambda: summarize_folder_contents(Path(cfg.archive_dir), cwd, endpoint),  # type: ignore[arg-type]
+        )
         return {"ok": True, **result}
 
     @app.get("/api/jobs")
@@ -1053,6 +1335,7 @@ def create_app(
         job_name: str = Form(""),
         folder: str = Form(""),
         tags: str = Form(""),
+        credential_id: str = Form(""),
         provider: str = Form(""),
         model: str = Form(""),
         dpi: int = Form(0),
@@ -1098,13 +1381,14 @@ def create_app(
             settings,
             provider_id=provider.strip() or None,
             model=model.strip() or None,
+            credential_id=credential_id.strip() or None,
         )
         config = OcrConfig(
             model=vision_ep.model,
             provider=vision_ep.provider_id,
             base_url=vision_ep.base_url,
             api_key=vision_ep.api_key,
-            ollama_url=vision_ep.base_url if vision_ep.provider_id == "ollama" else settings.ollama_url,
+            ollama_url=vision_ep.base_url if vision_ep.provider_id in ("ollama", "ollama_local") else settings.ollama_url,
             dpi=max(72, min(dpi or settings.dpi, 600)),
             max_image_dim=max(512, min(max_dim or settings.max_image_dim, 4096)),
             num_ctx=settings.num_ctx,
@@ -1144,9 +1428,16 @@ def create_app(
             ]
 
         if ocr_fn is None:
+            vis_cred = find_credential(settings, vision_ep.credential_id)
+            if vis_cred is not None and not vis_cred.get("enabled", True):
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Credential '{vis_cred['name']}' is disabled. Enable it in Providers & Models.",
+                )
             try:
                 check_endpoint_ready(vision_ep, require_vision=True)
             except ProviderError as exc:
+                _record_role_error("vision", vision_ep.credential_id, exc)
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         post_llm = {

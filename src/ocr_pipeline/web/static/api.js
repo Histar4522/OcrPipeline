@@ -10,6 +10,22 @@ async function requestJson(url, options) {
 
 export const fetchHealth = () => requestJson("/api/health");
 export const fetchProviders = () => requestJson("/api/providers");
+export const fetchProviderStatus = (refresh = false) =>
+  requestJson(`/api/providers/status${refresh ? "?refresh=true" : ""}`);
+export const createCredential = (payload) =>
+  requestJson("/api/credentials", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+export const updateCredential = (credId, payload) =>
+  requestJson(`/api/credentials/${encodeURIComponent(credId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+export const deleteCredential = (credId) =>
+  requestJson(`/api/credentials/${encodeURIComponent(credId)}`, { method: "DELETE" });
 export const testProvider = (payload) =>
   requestJson("/api/providers/test", {
     method: "POST",
@@ -45,21 +61,27 @@ export const installUpdate = (payload) =>
   });
 export const fetchUpdateInstallStatus = () => requestJson("/api/updates/install-status");
 
-export const fetchModels = () => requestJson("/api/models");
+export const fetchModels = (credentialId = "") =>
+  requestJson(`/api/models${credentialId ? `?credential_id=${encodeURIComponent(credentialId)}` : ""}`);
 export const startOllama = () => requestJson("/api/ollama/start", { method: "POST" });
-export const pullModel = (model) => {
+export const pullModel = (model, credentialId = "") => {
   const fd = new FormData();
   fd.append("model", model);
+  if (credentialId) fd.append("credential_id", credentialId);
   return requestJson("/api/models/pull", { method: "POST", body: fd });
 };
-export const startModelPull = (model) => {
+export const startModelPull = (model, credentialId = "") => {
   const fd = new FormData();
   fd.append("model", model);
+  if (credentialId) fd.append("credential_id", credentialId);
   return requestJson("/api/models/pull-async", { method: "POST", body: fd });
 };
 export const fetchModelPullStatus = () => requestJson("/api/models/pull-status");
-export const deleteModel = (model) =>
-  requestJson(`/api/models/${encodeURIComponent(model)}`, { method: "DELETE" });
+export const deleteModel = (model, credentialId = "") =>
+  requestJson(
+    `/api/models/${encodeURIComponent(model)}${credentialId ? `?credential_id=${encodeURIComponent(credentialId)}` : ""}`,
+    { method: "DELETE" }
+  );
 
 export const fetchFolders = () => requestJson("/api/folders");
 export const fetchArtifacts = ({ cwd = "", q = "", tag = "", sort = "newest" } = {}) => {

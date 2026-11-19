@@ -33,6 +33,8 @@ class ProviderSpec:
     supports_vision: bool
     supports_llm: bool
     env_var: str
+    short_label: str = ""
+    singleton: bool = False
     suggested_vision_models: tuple[str, ...] = ()
     suggested_llm_models: tuple[str, ...] = ()
 
@@ -49,16 +51,34 @@ class ProviderEndpoint:
     timeout_seconds: float = 180.0
     max_retries: int = 2
     auto_ctx: bool = True
+    credential_id: str = ""
+    credential_name: str = ""
+
+
+STATUS_LABELS: dict[str, str] = {
+    "ok": "",
+    "connecting": "Connecting",
+    "offline": "Offline",
+    "out_of_quota": "Out of Quota",
+    "invalid_key": "Invalid Key",
+    "no_key": "No Key",
+    "no_url": "No URL",
+    "model_missing": "Not Pulled",
+    "disabled": "Disabled",
+    "error": "Error",
+}
 
 
 PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
-        id="ollama",
-        label="Ollama (Local)",
+        id="ollama_local",
+        label="Ollama Local",
+        short_label="Ollama Local",
         protocol="ollama",
         default_base_url="http://localhost:11434",
         requires_api_key=False,
         is_local=True,
+        singleton=True,
         supports_vision=True,
         supports_llm=True,
         env_var="OLLAMA_HOST",
@@ -66,8 +86,24 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
         suggested_llm_models=("qwen3:1.7b", "qwen2.5:3b", "llama3.2:3b", "gemma3:4b"),
     ),
     ProviderSpec(
+        id="ollama",
+        label="Ollama (Remote / Custom)",
+        short_label="Ollama",
+        protocol="ollama",
+        default_base_url="http://localhost:11434",
+        requires_api_key=False,
+        is_local=True,
+        singleton=False,
+        supports_vision=True,
+        supports_llm=True,
+        env_var="",
+        suggested_vision_models=("glm-ocr", "deepseek-ocr", "qwen3-vl:4b", "qwen3-vl:8b"),
+        suggested_llm_models=("qwen3:1.7b", "qwen2.5:3b", "llama3.2:3b", "gemma3:4b"),
+    ),
+    ProviderSpec(
         id="llama_cpp",
         label="llama.cpp Server (Local)",
+        short_label="llama.cpp",
         protocol="openai_compat",
         default_base_url="http://localhost:8080/v1",
         requires_api_key=False,
@@ -81,6 +117,7 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         id="openai",
         label="OpenAI",
+        short_label="OpenAI",
         protocol="openai_compat",
         default_base_url="https://api.openai.com/v1",
         requires_api_key=True,
@@ -94,6 +131,7 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         id="anthropic",
         label="Anthropic",
+        short_label="Anthropic",
         protocol="anthropic",
         default_base_url="https://api.anthropic.com/v1",
         requires_api_key=True,
@@ -107,6 +145,7 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         id="google",
         label="Google Gemini",
+        short_label="Google",
         protocol="google",
         default_base_url="https://generativelanguage.googleapis.com/v1beta",
         requires_api_key=True,
@@ -120,19 +159,21 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         id="deepseek",
         label="DeepSeek",
+        short_label="DeepSeek",
         protocol="openai_compat",
         default_base_url="https://api.deepseek.com/v1",
         requires_api_key=True,
         is_local=False,
-        supports_vision=False,
+        supports_vision=True,
         supports_llm=True,
         env_var="DEEPSEEK_API_KEY",
-        suggested_vision_models=(),
-        suggested_llm_models=("deepseek-chat",),
+        suggested_vision_models=("deepseek-ocr", "deepseek-flash", "deepseek-ai/DeepSeek-OCR"),
+        suggested_llm_models=("deepseek-chat", "deepseek-reasoner"),
     ),
     ProviderSpec(
         id="xai",
         label="Grok (xAI)",
+        short_label="Grok",
         protocol="openai_compat",
         default_base_url="https://api.x.ai/v1",
         requires_api_key=True,
@@ -146,6 +187,7 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         id="qwen",
         label="Qwen (DashScope)",
+        short_label="Qwen",
         protocol="openai_compat",
         default_base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         requires_api_key=True,
@@ -159,6 +201,7 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         id="custom",
         label="Custom OpenAI-Compatible",
+        short_label="Custom",
         protocol="openai_compat",
         default_base_url="",
         requires_api_key=False,
@@ -210,11 +253,41 @@ def resolve_base_url(provider_id: str, configured_url: str = "") -> str:
     if url:
         return url
     spec = get_provider_spec(provider_id)
-    if spec.id == "ollama":
+    if spec.id == "ollama_local" or (spec.id == "ollama" and not configured_url):
         env_host = os.environ.get("OLLAMA_HOST", "").strip().rstrip("/")
         if env_host:
             return env_host if "://" in env_host else f"http://{env_host}"
     return spec.default_base_url.rstrip("/")
+
+
+def classify_http_error(status_code: int, body_text: str = "") -> str:
+    """Classify an HTTP error status/body into a concise navbar status key."""
+    lower = (body_text or "").lower()
+    if status_code in (402, 429) or any(
+        tok in lower for tok in ("quota", "insufficient_quota", "rate limit", "rate_limit", "billing", "credit")
+    ):
+        return "out_of_quota"
+    if status_code in (401, 403):
+        return "invalid_key"
+    return "error"
+
+
+def classify_exception_status(exc: Exception) -> str:
+    """Classify a runtime exception into a normalized status key."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return classify_http_error(exc.response.status_code, exc.response.text[:300])
+    if isinstance(exc, httpx.HTTPError):
+        return "offline"
+    msg = str(exc).lower()
+    if any(tok in msg for tok in ("http 429", "http 402", "quota", "insufficient_quota", "rate limit", "credit")):
+        return "out_of_quota"
+    if any(tok in msg for tok in ("http 401", "http 403", "api key is required", "invalid api key", "unauthorized")):
+        return "invalid_key"
+    if "not pulled" in msg:
+        return "model_missing"
+    if any(tok in msg for tok in ("cannot reach", "unreachable", "connection", "refused", "timed out")):
+        return "offline"
+    return "error"
 
 
 def _format_http_error(spec: ProviderSpec, exc: httpx.HTTPStatusError) -> str:
@@ -422,9 +495,9 @@ def vision_ocr_image_b64(
     if spec.protocol == "ollama":
         cfg = OcrConfig(
             model=endpoint.model,
-            provider="ollama",
-            base_url=resolve_base_url("ollama", endpoint.base_url),
-            ollama_url=resolve_base_url("ollama", endpoint.base_url),
+            provider=spec.id,
+            base_url=resolve_base_url(spec.id, endpoint.base_url),
+            ollama_url=resolve_base_url(spec.id, endpoint.base_url),
             num_ctx=endpoint.num_ctx,
             timeout_seconds=endpoint.timeout_seconds,
             max_retries=endpoint.max_retries,
@@ -514,7 +587,7 @@ def chat_text(
         raise ProviderError(f"LLM model is required for {spec.label}.")
 
     if spec.protocol == "ollama":
-        base = resolve_base_url("ollama", endpoint.base_url)
+        base = resolve_base_url(spec.id, endpoint.base_url)
         url = f"{base}/api/chat"
         payload: dict = {
             "model": endpoint.model,
@@ -592,6 +665,8 @@ def test_provider_connection(
             "online": False,
             "installed": False,
             "has_key": bool(resolved_key),
+            "status_code": "no_url",
+            "status_text": STATUS_LABELS["no_url"],
             "models": [],
             "message": "Custom provider Base URL is required.",
         }
@@ -602,12 +677,14 @@ def test_provider_connection(
             "online": False,
             "installed": False,
             "has_key": False,
+            "status_code": "no_key",
+            "status_text": STATUS_LABELS["no_key"],
             "models": list(spec.suggested_vision_models or spec.suggested_llm_models),
             "message": f"Missing API key (enter below or set {spec.env_var}).",
         }
 
     if spec.protocol == "ollama":
-        installed = find_ollama_executable() is not None
+        installed = find_ollama_executable() is not None if spec.id == "ollama_local" else True
         try:
             detailed = list_models_detailed(resolved_url, timeout=timeout)
             names = [m["name"] for m in detailed]
@@ -616,6 +693,8 @@ def test_provider_connection(
                 "online": True,
                 "installed": True,
                 "has_key": True,
+                "status_code": "ok",
+                "status_text": "",
                 "models": names,
                 "detailed": detailed,
                 "message": f"Connected ({len(names)} installed model(s)).",
@@ -626,6 +705,8 @@ def test_provider_connection(
                 "online": False,
                 "installed": installed,
                 "has_key": True,
+                "status_code": "offline",
+                "status_text": STATUS_LABELS["offline"],
                 "models": [],
                 "message": f"Ollama unreachable at {resolved_url}: {exc}",
             }
@@ -661,15 +742,20 @@ def test_provider_connection(
             "online": True,
             "installed": True,
             "has_key": bool(resolved_key),
+            "status_code": "ok",
+            "status_text": "",
             "models": names,
             "message": f"Connected ({len(names)} model(s) listed).",
         }
     except httpx.HTTPStatusError as exc:
+        code = classify_http_error(exc.response.status_code, exc.response.text[:300])
         return {
             "provider": spec.id,
             "online": False,
             "installed": True,
             "has_key": bool(resolved_key),
+            "status_code": code,
+            "status_text": STATUS_LABELS.get(code, "Error"),
             "models": [],
             "message": _format_http_error(spec, exc),
         }
@@ -679,9 +765,55 @@ def test_provider_connection(
             "online": False,
             "installed": spec.is_local,
             "has_key": bool(resolved_key),
+            "status_code": "offline",
+            "status_text": STATUS_LABELS["offline"],
             "models": [],
             "message": f"{spec.label} unreachable: {exc}",
         }
+
+
+def probe_endpoint_status(
+    endpoint: ProviderEndpoint,
+    *,
+    enabled: bool = True,
+    timeout: float = 3.5,
+) -> dict:
+    """Probe an active role endpoint and return normalized health + optional status badge text."""
+    if not enabled:
+        return {
+            "status": "disabled",
+            "status_text": STATUS_LABELS["disabled"],
+            "online": False,
+            "installed": False,
+            "models": [],
+            "detailed": [],
+            "message": f"{endpoint.credential_name or endpoint.provider_id} is disabled.",
+        }
+
+    res = test_provider_connection(
+        endpoint.provider_id,
+        base_url=endpoint.base_url,
+        api_key=endpoint.api_key,
+        timeout=timeout,
+    )
+    status_code = str(res.get("status_code") or ("ok" if res.get("online") else "error"))
+    spec = get_provider_spec(endpoint.provider_id)
+    model_name = endpoint.model.strip()
+    if status_code == "ok" and spec.protocol == "ollama" and model_name:
+        installed_names = set(res.get("models") or [])
+        if model_name not in installed_names and f"{model_name}:latest" not in installed_names:
+            status_code = "model_missing"
+            res["message"] = f"Model '{model_name}' is not pulled on {endpoint.credential_name or spec.label}."
+
+    return {
+        "status": status_code,
+        "status_text": STATUS_LABELS.get(status_code, ""),
+        "online": bool(res.get("online")) and status_code == "ok",
+        "installed": bool(res.get("installed")),
+        "models": list(res.get("models") or []),
+        "detailed": list(res.get("detailed") or []),
+        "message": str(res.get("message") or ""),
+    }
 
 
 def check_endpoint_ready(endpoint: ProviderEndpoint, *, require_vision: bool = False) -> None:
@@ -694,7 +826,7 @@ def check_endpoint_ready(endpoint: ProviderEndpoint, *, require_vision: bool = F
     if not endpoint.model.strip():
         raise ProviderError(f"Model name is required for {spec.label}.")
     if spec.protocol == "ollama":
-        check_ollama_ready(resolve_base_url("ollama", endpoint.base_url), endpoint.model)
+        check_ollama_ready(resolve_base_url(spec.id, endpoint.base_url), endpoint.model)
         return
     if spec.id == "custom" and not resolve_base_url("custom", endpoint.base_url):
         raise ProviderError("Custom provider Base URL is required.")

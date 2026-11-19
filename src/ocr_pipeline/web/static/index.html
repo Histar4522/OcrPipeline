@@ -38,10 +38,10 @@
           </button>
         </li>
       </ul>
-      <div class="d-flex align-items-center gap-2">
+      <div class="d-flex align-items-center gap-2 flex-wrap">
         <button id="navUpdateBtn" class="btn btn-xs btn-warning text-dark fw-semibold d-none" type="button" title="View available update"></button>
-        <span id="llmStatusBadge" class="badge text-bg-secondary d-none" title="Optional Assistant LLM"></span>
-        <span id="ollamaBadge" class="badge text-bg-secondary">Checking provider...</span>
+        <button id="navVisualBadge" class="nav-model-pill nav-pill-connecting" type="button" title="Configure Visual Model">Visual: … [Connecting]</button>
+        <button id="navLlmBadge" class="nav-model-pill nav-pill-disabled" type="button" title="Configure Assistant LLM">LLM: Disabled</button>
         <div class="dropdown">
           <button id="themeDropdownBtn" class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" title="Theme">
             <i id="themeIcon" class="bi bi-circle-half me-1"></i><span id="themeLabel">Auto</span>
@@ -52,7 +52,7 @@
             <li><button class="dropdown-item" type="button" data-theme="dark"><i class="bi bi-moon-stars me-2"></i>Dark</button></li>
           </ul>
         </div>
-        <button id="navRefreshBtn" class="btn btn-sm btn-outline-secondary" type="button" title="Refresh Ollama status">
+        <button id="navRefreshBtn" class="btn btn-sm btn-outline-secondary" type="button" title="Refresh model &amp; provider status">
           <i class="bi bi-arrow-clockwise"></i>
         </button>
       </div>
@@ -142,18 +142,25 @@
                     <label class="form-label small fw-semibold">Tags</label>
                     <div id="jobTagsContainer"></div>
                   </div>
-                  <div class="col-5">
-                    <label class="form-label small fw-semibold" for="jobProviderSelect">Vision Provider</label>
-                    <select id="jobProviderSelect" class="form-select form-select-sm"></select>
-                  </div>
-                  <div class="col-7">
-                    <label class="form-label small fw-semibold" for="modelSelect">Vision / OCR Model</label>
+                  <div class="col-12">
+                    <label class="form-label small fw-semibold" for="jobVisualModelSelect">Visual / OCR Model</label>
                     <div class="input-group input-group-sm">
-                      <input id="modelSelect" list="jobModelDatalist" type="text" class="form-control form-control-sm" required />
-                      <datalist id="jobModelDatalist"></datalist>
+                      <select id="jobVisualModelSelect" class="form-select form-select-sm"></select>
                       <button id="pullModelBtn" class="btn btn-outline-secondary d-none" type="button">
                         <i class="bi bi-download me-1"></i>Pull
                       </button>
+                    </div>
+                  </div>
+                  <div id="jobCustomModelPanel" class="col-12 d-none">
+                    <div class="row g-2 p-2 rounded border bg-body-tertiary">
+                      <div class="col-5">
+                        <label class="form-label small mb-1" for="jobCustomCredSelect">Credential Source</label>
+                        <select id="jobCustomCredSelect" class="form-select form-select-sm"></select>
+                      </div>
+                      <div class="col-7">
+                        <label class="form-label small mb-1" for="jobCustomModelInput">Custom Model Name</label>
+                        <input id="jobCustomModelInput" type="text" class="form-control form-control-sm" placeholder="e.g. qwen3-vl:8b, deepseek-ocr" />
+                      </div>
                     </div>
                   </div>
                   <div class="col-6">
@@ -400,139 +407,321 @@
 
     <!-- VIEW 3: PROVIDERS & MODELS -->
     <section id="modelsView" class="app-view d-none">
-      <div class="row g-4 mb-4">
-        <div class="col-lg-7">
-          <div class="card shadow-sm h-100">
-            <div class="card-header d-flex justify-content-between align-items-center">
-              <span class="fw-semibold"><i class="bi bi-sliders me-1"></i> Active Model Roles</span>
-              <button id="saveRolesBtn" class="btn btn-sm btn-primary" type="button">Save Roles</button>
-            </div>
-            <div class="card-body small">
-              <div class="border rounded p-3 mb-3 bg-body-tertiary">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                  <span class="fw-semibold">Vision / OCR Model</span>
-                  <span class="badge text-bg-primary">Mandatory</span>
-                </div>
-                <div class="row g-2">
-                  <div class="col-md-5">
-                    <label class="form-label mb-1" for="roleVisionProvider">Provider</label>
-                    <select id="roleVisionProvider" class="form-select form-select-sm"></select>
-                  </div>
-                  <div class="col-md-7">
-                    <label class="form-label mb-1" for="roleVisionModel">Model Name</label>
-                    <input id="roleVisionModel" list="visionModelDatalist" type="text" class="form-control form-control-sm" placeholder="e.g. glm-ocr, gpt-4.1-mini, gemini-2.5-flash" />
-                    <datalist id="visionModelDatalist"></datalist>
-                  </div>
-                </div>
-              </div>
+      <div class="pref-shell shadow-sm mx-auto" style="max-width: 1140px;">
+        <aside class="pref-sidebar">
+          <div class="pref-group-label">Model Roles</div>
+          <button class="pref-nav-btn active" type="button" data-pref-pane="visualConfigPane">
+            <span><i class="bi bi-eye me-2"></i>Visual Model Config</span>
+            <span class="badge bg-body-secondary text-body pref-nav-badge" id="sideVisualBadge">OCR</span>
+          </button>
+          <button class="pref-nav-btn" type="button" data-pref-pane="llmConfigPane">
+            <span><i class="bi bi-stars me-2"></i>LLM Model Config</span>
+            <span class="badge bg-body-secondary text-body pref-nav-badge" id="sideLlmBadge">Off</span>
+          </button>
 
-              <div class="border rounded p-3 bg-body-tertiary">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                  <div class="form-check form-switch mb-0">
-                    <input id="roleLlmEnabled" class="form-check-input" type="checkbox" />
-                    <label class="form-check-label fw-semibold" for="roleLlmEnabled">Assistant LLM (Auto-tag, Rename, Organize, Summarize, Cleanup)</label>
-                  </div>
-                  <span class="badge text-bg-secondary">Optional</span>
-                </div>
-                <div id="roleLlmConfigFields">
-                  <div class="row g-2 mb-2">
-                    <div class="col-md-5">
-                      <label class="form-label mb-1" for="roleLlmProvider">Provider</label>
-                      <select id="roleLlmProvider" class="form-select form-select-sm"></select>
-                    </div>
-                    <div class="col-md-7">
-                      <label class="form-label mb-1" for="roleLlmModel">Small Local or Cloud LLM</label>
-                      <input id="roleLlmModel" list="llmModelDatalist" type="text" class="form-control form-control-sm" placeholder="e.g. qwen3:1.7b, llama3.2:3b, deepseek-chat" />
-                      <datalist id="llmModelDatalist"></datalist>
-                    </div>
-                  </div>
-                  <div class="d-flex flex-wrap gap-3 pt-1">
-                    <div class="form-check mb-0">
-                      <input id="roleAutoTag" class="form-check-input" type="checkbox" />
-                      <label class="form-check-label" for="roleAutoTag">Auto-tag after OCR</label>
-                    </div>
-                    <div class="form-check mb-0">
-                      <input id="roleAutoSummarize" class="form-check-input" type="checkbox" />
-                      <label class="form-check-label" for="roleAutoSummarize">Auto-summarize</label>
-                    </div>
-                    <div class="form-check mb-0">
-                      <input id="roleAutoRename" class="form-check-input" type="checkbox" />
-                      <label class="form-check-label" for="roleAutoRename">Auto-rename</label>
-                    </div>
-                  </div>
-                  <div class="border-top mt-2 pt-2">
-                    <div class="form-check form-switch mb-1">
-                      <input id="roleLlmAutoCtx" class="form-check-input" type="checkbox" checked />
-                      <label class="form-check-label fw-semibold" for="roleLlmAutoCtx">Auto-size context (<code>num_ctx</code>) from VRAM &amp; split large documents</label>
-                    </div>
-                    <div id="llmVramEstimateBox" class="text-muted"></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+          <div class="pref-group-label mt-3">Providers &amp; Integrations</div>
+          <button class="pref-nav-btn" type="button" data-pref-pane="credentialsPane">
+            <span><i class="bi bi-key me-2"></i>Credential Config</span>
+            <span class="badge bg-body-secondary text-body pref-nav-badge" id="sideCredCountBadge">1</span>
+          </button>
+          <button class="pref-nav-btn" type="button" data-pref-pane="localOllamaPane">
+            <span><i class="bi bi-hdd-stack me-2"></i>Local Ollama Integration</span>
+            <span class="badge bg-body-secondary text-body pref-nav-badge" id="sideLocalOllamaBadge">On</span>
+          </button>
+        </aside>
 
-        <div class="col-lg-5">
-          <div class="card shadow-sm h-100">
-            <div class="card-header fw-semibold"><i class="bi bi-plug me-1"></i> Provider Credentials &amp; Connection</div>
-            <div class="card-body small">
-              <div class="mb-2">
-                <label class="form-label fw-semibold mb-1" for="cfgProviderSelect">Provider</label>
-                <select id="cfgProviderSelect" class="form-select form-select-sm"></select>
+        <div class="pref-content">
+          <!-- PANE 1: VISUAL MODEL CONFIG -->
+          <div id="visualConfigPane" class="pref-pane">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+              <div>
+                <h5 class="mb-0 fw-semibold">Visual Model Config <span class="badge text-bg-primary ms-1 align-middle" style="font-size:0.7rem;">Mandatory</span></h5>
+                <div class="small text-muted">Primary multimodal model used to transcribe PDFs and images into Markdown.</div>
               </div>
-              <div class="mb-2">
-                <label class="form-label fw-semibold mb-1" for="cfgBaseUrl">Base URL</label>
-                <input id="cfgBaseUrl" type="url" class="form-control form-control-sm" />
-              </div>
-              <div class="mb-2">
-                <label class="form-label fw-semibold mb-1" for="cfgApiKey">API Key</label>
-                <input id="cfgApiKey" type="password" class="form-control form-control-sm" autocomplete="off" />
-              </div>
-              <div id="cfgEnvHint" class="text-muted mb-3"></div>
-              <div class="d-flex gap-2">
-                <button id="cfgTestProviderBtn" class="btn btn-sm btn-outline-primary" type="button">Test &amp; Fetch Models</button>
-                <button id="cfgSaveProviderBtn" class="btn btn-sm btn-primary" type="button">Save Provider</button>
-              </div>
-              <div id="cfgProviderResult" class="mt-2"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="row g-4">
-        <div class="col-lg-7">
-          <div class="card shadow-sm">
-            <div class="card-header d-flex justify-content-between align-items-center">
-              <span class="fw-semibold"><i class="bi bi-hdd-stack me-1"></i> Installed Local Ollama Models</span>
-              <button id="modelsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">
-                <i class="bi bi-arrow-clockwise me-1"></i> Refresh
+              <button id="saveVisualConfigBtn" class="btn btn-sm btn-primary px-3" type="button">
+                <i class="bi bi-check2-circle me-1"></i>Save Visual Config
               </button>
             </div>
-            <div class="table-responsive">
-              <table class="table table-hover align-middle mb-0 small">
-                <thead class="border-bottom">
-                  <tr><th>Model</th><th>Params</th><th>Quant</th><th>Size</th><th class="text-end">Actions</th></tr>
-                </thead>
-                <tbody id="installedModelsBody"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-        <div class="col-lg-5">
-          <div class="card shadow-sm mb-4">
-            <div class="card-header fw-semibold"><i class="bi bi-cloud-download me-1"></i> Pull Any Ollama Model</div>
-            <div class="card-body">
-              <div class="input-group input-group-sm">
-                <input id="customPullInput" type="text" class="form-control" placeholder="e.g. glm-ocr, qwen3:1.7b, llama3.2:3b" />
-                <button id="customPullBtn" class="btn btn-primary" type="button">Pull</button>
+
+            <div class="pref-section-box">
+              <div class="pref-section-title">Model Selection</div>
+              <div class="row g-3 align-items-end">
+                <div class="col-md-8">
+                  <label class="form-label small fw-semibold mb-1" for="visualModelSelect">Active Visual Model</label>
+                  <select id="visualModelSelect" class="form-select form-select-sm"></select>
+                </div>
+                <div class="col-md-4 d-flex gap-2">
+                  <button id="visualOpenCredsBtn" class="btn btn-sm btn-outline-secondary w-100" type="button">
+                    <i class="bi bi-key me-1"></i>Manage Credentials
+                  </button>
+                </div>
               </div>
-              <div id="modelActionStatus" class="small text-muted mt-2"></div>
+              <div id="visualCustomPanel" class="row g-2 mt-2 p-2 rounded border bg-body-tertiary d-none">
+                <div class="col-md-5">
+                  <label class="form-label small fw-semibold mb-1" for="visualCustomCredSelect">Credential Source</label>
+                  <select id="visualCustomCredSelect" class="form-select form-select-sm"></select>
+                </div>
+                <div class="col-md-7">
+                  <label class="form-label small fw-semibold mb-1" for="visualCustomModelInput">Custom Model Identifier</label>
+                  <input id="visualCustomModelInput" type="text" class="form-control form-control-sm" placeholder="e.g. glm-ocr, deepseek-ocr, qwen3-vl:8b" />
+                </div>
+              </div>
+            </div>
+
+            <div class="pref-section-box" id="visualQuickCredBox">
+              <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-3">
+                <span class="pref-section-title border-0 p-0 mb-0">Credential &amp; Endpoint for Selected Model</span>
+                <span id="visualCredStatusBadge" class="badge text-bg-secondary">Checking...</span>
+              </div>
+              <div id="visualQuickLocalNotice" class="d-none small">
+                <p class="text-muted mb-2">Managed centrally via the singleton <strong>Ollama Local</strong> integration.</p>
+                <button id="visualGoLocalOllamaBtn" class="btn btn-sm btn-outline-primary" type="button">
+                  <i class="bi bi-hdd-stack me-1"></i>Open Local Ollama Integration
+                </button>
+              </div>
+              <div id="visualQuickRemoteFields" class="row g-2 small">
+                <div class="col-md-5">
+                  <label class="form-label fw-semibold mb-1" for="visualCredBaseUrl">Base URL</label>
+                  <input id="visualCredBaseUrl" type="url" class="form-control form-control-sm" />
+                </div>
+                <div class="col-md-7">
+                  <label class="form-label fw-semibold mb-1" for="visualCredApiKey">API Key</label>
+                  <input id="visualCredApiKey" type="password" class="form-control form-control-sm" autocomplete="off" />
+                </div>
+                <div class="col-12 d-flex flex-wrap align-items-center gap-2 mt-2">
+                  <button id="visualTestCredBtn" class="btn btn-xs btn-outline-primary" type="button">Test &amp; Fetch Models</button>
+                  <button id="visualSaveCredBtn" class="btn btn-xs btn-primary" type="button">Save Credential</button>
+                  <span id="visualQuickCredHint" class="text-muted ms-1"></span>
+                </div>
+              </div>
             </div>
           </div>
-          <div class="card shadow-sm">
-            <div class="card-header fw-semibold"><i class="bi bi-stars me-1"></i> Recommended Local OCR &amp; Small LLMs</div>
-            <div id="recommendedModelsList" class="list-group list-group-flush small"></div>
+
+          <!-- PANE 2: LLM MODEL CONFIG -->
+          <div id="llmConfigPane" class="pref-pane d-none">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+              <div>
+                <h5 class="mb-0 fw-semibold">LLM Model Config <span class="badge text-bg-secondary ms-1 align-middle" style="font-size:0.7rem;">Optional</span></h5>
+                <div class="small text-muted">Optional text LLM powering Auto-Tagging, Renaming, Summaries, Folder Overview &amp; OCR Cleanup.</div>
+              </div>
+              <div class="d-flex align-items-center gap-3">
+                <div class="form-check form-switch mb-0">
+                  <input id="roleLlmEnabled" class="form-check-input" type="checkbox" />
+                  <label class="form-check-label small fw-semibold" for="roleLlmEnabled">Enable Assistant LLM</label>
+                </div>
+                <button id="saveLlmConfigBtn" class="btn btn-sm btn-primary px-3" type="button">
+                  <i class="bi bi-check2-circle me-1"></i>Save LLM Config
+                </button>
+              </div>
+            </div>
+
+            <div id="roleLlmConfigFields">
+              <div class="pref-section-box">
+                <div class="pref-section-title">Model Selection</div>
+                <div class="row g-3 align-items-end">
+                  <div class="col-md-8">
+                    <label class="form-label small fw-semibold mb-1" for="llmModelSelect">Assistant LLM Model</label>
+                    <select id="llmModelSelect" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="col-md-4 d-flex gap-2">
+                    <button id="llmOpenCredsBtn" class="btn btn-sm btn-outline-secondary w-100" type="button">
+                      <i class="bi bi-key me-1"></i>Manage Credentials
+                    </button>
+                  </div>
+                </div>
+                <div id="llmCustomPanel" class="row g-2 mt-2 p-2 rounded border bg-body-tertiary d-none">
+                  <div class="col-md-5">
+                    <label class="form-label small fw-semibold mb-1" for="llmCustomCredSelect">Credential Source</label>
+                    <select id="llmCustomCredSelect" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="col-md-7">
+                    <label class="form-label small fw-semibold mb-1" for="llmCustomModelInput">Custom Model Identifier</label>
+                    <input id="llmCustomModelInput" type="text" class="form-control form-control-sm" placeholder="e.g. qwen3:1.7b, deepseek-chat, gpt-4.1-mini" />
+                  </div>
+                </div>
+              </div>
+
+              <div class="pref-section-box" id="llmQuickCredBox">
+                <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-3">
+                  <span class="pref-section-title border-0 p-0 mb-0">Credential &amp; Endpoint for Selected Model</span>
+                  <span id="llmCredStatusBadge" class="badge text-bg-secondary">Checking...</span>
+                </div>
+                <div id="llmQuickLocalNotice" class="d-none small">
+                  <p class="text-muted mb-2">Managed centrally via the singleton <strong>Ollama Local</strong> integration.</p>
+                  <button id="llmGoLocalOllamaBtn" class="btn btn-sm btn-outline-primary" type="button">
+                    <i class="bi bi-hdd-stack me-1"></i>Open Local Ollama Integration
+                  </button>
+                </div>
+                <div id="llmQuickRemoteFields" class="row g-2 small">
+                  <div class="col-md-5">
+                    <label class="form-label fw-semibold mb-1" for="llmCredBaseUrl">Base URL</label>
+                    <input id="llmCredBaseUrl" type="url" class="form-control form-control-sm" />
+                  </div>
+                  <div class="col-md-7">
+                    <label class="form-label fw-semibold mb-1" for="llmCredApiKey">API Key</label>
+                    <input id="llmCredApiKey" type="password" class="form-control form-control-sm" autocomplete="off" />
+                  </div>
+                  <div class="col-12 d-flex flex-wrap align-items-center gap-2 mt-2">
+                    <button id="llmTestCredBtn" class="btn btn-xs btn-outline-primary" type="button">Test &amp; Fetch Models</button>
+                    <button id="llmSaveCredBtn" class="btn btn-xs btn-primary" type="button">Save Credential</button>
+                    <span id="llmQuickCredHint" class="text-muted ms-1"></span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="pref-section-box small">
+                <div class="pref-section-title">Post-OCR Defaults &amp; Context Optimization</div>
+                <div class="d-flex flex-wrap gap-3 mb-3">
+                  <div class="form-check mb-0">
+                    <input id="roleAutoTag" class="form-check-input" type="checkbox" />
+                    <label class="form-check-label" for="roleAutoTag">Auto-tag after OCR</label>
+                  </div>
+                  <div class="form-check mb-0">
+                    <input id="roleAutoSummarize" class="form-check-input" type="checkbox" />
+                    <label class="form-check-label" for="roleAutoSummarize">Auto-summarize</label>
+                  </div>
+                  <div class="form-check mb-0">
+                    <input id="roleAutoRename" class="form-check-input" type="checkbox" />
+                    <label class="form-check-label" for="roleAutoRename">Auto-rename</label>
+                  </div>
+                </div>
+                <div class="border-top pt-2">
+                  <div class="form-check form-switch mb-1">
+                    <input id="roleLlmAutoCtx" class="form-check-input" type="checkbox" checked />
+                    <label class="form-check-label fw-semibold" for="roleLlmAutoCtx">Auto-size context (<code>num_ctx</code>) from VRAM &amp; split large documents</label>
+                  </div>
+                  <div id="llmVramEstimateBox" class="text-muted"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- PANE 3: CREDENTIAL CONFIG -->
+          <div id="credentialsPane" class="pref-pane d-none">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+              <div>
+                <h5 class="mb-0 fw-semibold">Credential Config</h5>
+                <div class="small text-muted">Manage uniquely named provider credentials — including multiple servers of the same provider (e.g. <code>Ollama Garage Server</code>).</div>
+              </div>
+              <div class="d-flex gap-2">
+                <button id="refreshCredentialsBtn" class="btn btn-sm btn-outline-secondary" type="button">
+                  <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                </button>
+                <button id="addCredentialBtn" class="btn btn-sm btn-primary" type="button">
+                  <i class="bi bi-plus-lg me-1"></i>Add Credential
+                </button>
+              </div>
+            </div>
+
+            <div class="pref-section-box d-flex flex-wrap justify-content-between align-items-center gap-2">
+              <div>
+                <div class="fw-semibold d-flex align-items-center gap-2">
+                  <span>Ollama Local</span>
+                  <span class="badge bg-body-secondary text-body border">Built-in Singleton</span>
+                  <span id="credLocalOllamaStatusBadge" class="badge text-bg-secondary">Checking...</span>
+                </div>
+                <div class="small text-muted">All local Ollama settings, service controls, and model pulls live in <strong>Local Ollama Integration</strong>.</div>
+              </div>
+              <div class="d-flex align-items-center gap-3">
+                <div class="form-check form-switch mb-0">
+                  <input id="credOllamaLocalToggle" class="form-check-input" type="checkbox" checked />
+                  <label class="form-check-label small fw-semibold" for="credOllamaLocalToggle">Enabled</label>
+                </div>
+                <button id="credGoLocalOllamaBtn" class="btn btn-sm btn-outline-primary text-nowrap" type="button">
+                  Configure →
+                </button>
+              </div>
+            </div>
+
+            <div class="card shadow-sm" id="credentialsConfigCard">
+              <div class="card-header fw-semibold small d-flex justify-content-between align-items-center">
+                <span>Custom &amp; Cloud Provider Credentials</span>
+                <span class="text-muted fw-normal">Names must be unique</span>
+              </div>
+              <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0 small">
+                  <thead class="border-bottom">
+                    <tr>
+                      <th>Unique Name</th>
+                      <th>Provider</th>
+                      <th>Endpoint / Key</th>
+                      <th>Enabled</th>
+                      <th class="text-end">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="credentialsTableBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- PANE 4: LOCAL OLLAMA INTEGRATION -->
+          <div id="localOllamaPane" class="pref-pane d-none">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+              <div>
+                <h5 class="mb-0 fw-semibold">Local Ollama Integration</h5>
+                <div class="small text-muted">Singleton local Ollama daemon settings, installed models, and one-click model downloads.</div>
+              </div>
+              <div class="d-flex align-items-center gap-3">
+                <div class="form-check form-switch mb-0">
+                  <input id="localOllamaEnabledSwitch" class="form-check-input" type="checkbox" checked />
+                  <label class="form-check-label small fw-semibold" for="localOllamaEnabledSwitch">Enable Ollama Local</label>
+                </div>
+                <button id="modelsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">
+                  <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                </button>
+              </div>
+            </div>
+
+            <div class="pref-section-box small">
+              <div class="pref-section-title">Service Connection</div>
+              <div class="row g-2 align-items-center mb-2">
+                <div class="col-md-7">
+                  <div class="input-group input-group-sm">
+                    <span class="input-group-text">Base URL</span>
+                    <input id="localOllamaUrlInput" type="url" class="form-control" value="http://localhost:11434" />
+                    <button id="saveLocalOllamaUrlBtn" class="btn btn-outline-primary" type="button">Save URL</button>
+                  </div>
+                </div>
+                <div class="col-md-5 d-flex gap-2">
+                  <button id="testLocalOllamaBtn" class="btn btn-sm btn-outline-secondary" type="button">Test Connection</button>
+                  <button id="localOllamaStartBtn" class="btn btn-sm btn-primary d-none" type="button">Start Ollama</button>
+                </div>
+              </div>
+              <div id="localOllamaAlert" class="alert alert-secondary py-2 px-3 small mb-0">Checking local Ollama status...</div>
+            </div>
+
+            <div class="row g-3">
+              <div class="col-lg-7">
+                <div class="card shadow-sm h-100">
+                  <div class="card-header fw-semibold small"><i class="bi bi-hdd-stack me-1"></i> Installed Local Models</div>
+                  <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0 small">
+                      <thead class="border-bottom">
+                        <tr><th>Model</th><th>Params</th><th>Quant</th><th>Size</th><th class="text-end">Actions</th></tr>
+                      </thead>
+                      <tbody id="installedModelsBody"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              <div class="col-lg-5">
+                <div class="card shadow-sm mb-3">
+                  <div class="card-header fw-semibold small"><i class="bi bi-cloud-download me-1"></i> Pull Any Ollama Model</div>
+                  <div class="card-body">
+                    <div class="input-group input-group-sm">
+                      <input id="customPullInput" type="text" class="form-control" placeholder="e.g. glm-ocr, deepseek-ocr, qwen3:1.7b" />
+                      <button id="customPullBtn" class="btn btn-primary" type="button">Pull</button>
+                    </div>
+                    <div id="modelActionStatus" class="small text-muted mt-2"></div>
+                  </div>
+                </div>
+                <div class="card shadow-sm">
+                  <div class="card-header fw-semibold small"><i class="bi bi-stars me-1"></i> Recommended Local OCR &amp; Small LLMs</div>
+                  <div id="recommendedModelsList" class="list-group list-group-flush small"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -549,13 +738,11 @@
         </div>
         <div class="card-body">
           <form id="settingsForm" class="row g-3">
-            <div class="col-md-6">
-              <label class="form-label small fw-semibold">Ollama Server URL</label>
-              <input id="setOllamaUrl" type="url" class="form-control form-control-sm" required />
-            </div>
-            <div class="col-md-6">
-              <label class="form-label small fw-semibold">Default Model</label>
-              <input id="setDefaultModel" type="text" class="form-control form-control-sm" required />
+            <div class="col-12">
+              <div class="border rounded p-2 px-3 bg-body-tertiary d-flex flex-wrap justify-content-between align-items-center gap-2 small">
+                <span id="settingsModelSummaryBox" class="text-muted">Visual &amp; LLM models are managed in <strong>Providers &amp; Models</strong>.</span>
+                <button id="settingsOpenModelsBtn" class="btn btn-xs btn-outline-primary" type="button">Open Providers &amp; Models</button>
+              </div>
             </div>
             <div class="col-12">
               <label class="form-label small fw-semibold">Default Archive Directory</label>
@@ -748,52 +935,90 @@
 
             <!-- Step 2 -->
             <div class="wiz-step d-none" data-step="2">
-              <h4 class="mb-2">Choose Your Vision OCR Provider</h4>
-              <p class="text-muted small">Use local <strong>Ollama</strong> / <strong>llama.cpp</strong> for 100% offline privacy, or connect <strong>OpenAI</strong>, <strong>Anthropic</strong>, <strong>Google Gemini</strong>, <strong>Grok</strong>, <strong>Qwen</strong>, or any OpenAI-compatible server.</p>
-              <div class="row g-2 mb-3">
-                <div class="col-md-5">
-                  <label class="form-label small fw-semibold" for="wizVisionProvider">Vision Provider</label>
-                  <select id="wizVisionProvider" class="form-select form-select-sm"></select>
-                </div>
-                <div class="col-md-7">
-                  <label class="form-label small fw-semibold" for="wizOllamaUrl">Endpoint Base URL</label>
-                  <div class="input-group input-group-sm">
-                    <input id="wizOllamaUrl" type="url" class="form-control" value="http://localhost:11434" />
-                    <button id="wizRecheckBtn" class="btn btn-outline-secondary" type="button">Test Connection</button>
-                    <button id="wizStartOllamaBtn" class="btn btn-primary d-none" type="button">Start Ollama</button>
+              <h4 class="mb-2">Providers &amp; Credentials</h4>
+              <p class="text-muted small">Use <strong>Ollama Local</strong> for 100% offline privacy, and optionally add cloud or remote credentials (<strong>DeepSeek</strong> with Vision OCR, OpenAI, Anthropic, Google Gemini, remote Ollama servers, etc.).</p>
+
+              <div class="border rounded p-3 mb-3 bg-body-tertiary small">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="form-check form-switch mb-0">
+                    <input id="wizUseLocalOllama" class="form-check-input" type="checkbox" checked />
+                    <label class="form-check-label fw-semibold" for="wizUseLocalOllama">Enable Ollama Local (Singleton)</label>
+                  </div>
+                  <div class="d-flex gap-2">
+                    <button id="wizRecheckBtn" class="btn btn-xs btn-outline-secondary" type="button">Test Connection</button>
+                    <button id="wizStartOllamaBtn" class="btn btn-xs btn-primary d-none" type="button">Start Ollama</button>
                   </div>
                 </div>
-                <div class="col-12 d-none" id="wizApiKeyRow">
-                  <label class="form-label small fw-semibold" for="wizApiKey">API Key</label>
-                  <input id="wizApiKey" type="password" class="form-control form-control-sm" placeholder="Enter provider API key (or rely on environment variable)" autocomplete="off" />
+                <div id="wizLocalOllamaFields">
+                  <label class="form-label fw-semibold mb-1" for="wizOllamaUrl">Local Ollama Base URL</label>
+                  <input id="wizOllamaUrl" type="url" class="form-control form-control-sm mb-2" value="http://localhost:11434" />
+                </div>
+                <div id="wizOllamaAlert" class="alert alert-secondary py-2 px-3 small mb-0">Checking Ollama Local...</div>
+                <div id="wizInstallGuide" class="card border mt-2 d-none">
+                  <div class="card-body small py-2">
+                    <div class="fw-semibold mb-1">Ollama Not Detected — Quick Install</div>
+                    <ul class="mb-2">
+                      <li><strong>Windows:</strong> <code>winget install Ollama.Ollama</code></li>
+                      <li><strong>macOS:</strong> <code>brew install ollama</code></li>
+                      <li><strong>Linux:</strong> <code>curl -fsSL https://ollama.com/install.sh | sh</code></li>
+                    </ul>
+                    <button id="wizDownloadOllamaBtn" type="button" class="btn btn-xs btn-outline-primary">
+                      <i class="bi bi-box-arrow-up-right me-1"></i>Open ollama.com/download
+                    </button>
+                  </div>
                 </div>
               </div>
-              <div id="wizOllamaAlert" class="alert alert-secondary small mb-3">Checking provider connection...</div>
-              <div id="wizInstallGuide" class="card border d-none">
-                <div class="card-body small">
-                  <div class="fw-semibold mb-1">Ollama Not Detected — Quick Install</div>
-                  <p class="text-muted mb-2">Install Ollama for local offline OCR, or switch to another provider above:</p>
-                  <ul class="mb-2">
-                    <li><strong>Windows:</strong> <code>winget install Ollama.Ollama</code></li>
-                    <li><strong>macOS:</strong> <code>brew install ollama</code></li>
-                    <li><strong>Linux:</strong> <code>curl -fsSL https://ollama.com/install.sh | sh</code></li>
-                  </ul>
-                  <button id="wizDownloadOllamaBtn" type="button" class="btn btn-sm btn-outline-primary">
-                    <i class="bi bi-box-arrow-up-right me-1"></i>Open ollama.com/download in Browser
-                  </button>
+
+              <div class="border rounded p-3 bg-body-tertiary small">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="form-check form-switch mb-0">
+                    <input id="wizAddCloudCred" class="form-check-input" type="checkbox" />
+                    <label class="form-check-label fw-semibold" for="wizAddCloudCred">Add Remote / Cloud Credential (e.g. DeepSeek, OpenAI, Remote Ollama)</label>
+                  </div>
+                </div>
+                <div id="wizCloudCredFields" class="row g-2 d-none">
+                  <div class="col-md-6">
+                    <label class="form-label fw-semibold mb-1" for="wizVisionProvider">Provider Type</label>
+                    <select id="wizVisionProvider" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label fw-semibold mb-1" for="wizCredName">Unique Credential Name</label>
+                    <input id="wizCredName" type="text" class="form-control form-control-sm" placeholder="e.g. DeepSeek, Ollama Garage Server" />
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label fw-semibold mb-1" for="wizCloudBaseUrl">Base URL</label>
+                    <input id="wizCloudBaseUrl" type="url" class="form-control form-control-sm" />
+                  </div>
+                  <div class="col-md-6" id="wizApiKeyRow">
+                    <label class="form-label fw-semibold mb-1" for="wizApiKey">API Key</label>
+                    <input id="wizApiKey" type="password" class="form-control form-control-sm" placeholder="Enter API key or use env var" autocomplete="off" />
+                  </div>
+                  <div class="col-12 d-flex align-items-center gap-2 mt-1">
+                    <button id="wizSaveCloudCredBtn" class="btn btn-xs btn-primary" type="button">Test &amp; Add Credential</button>
+                    <span id="wizCloudCredMsg" class="text-muted"></span>
+                  </div>
                 </div>
               </div>
             </div>
 
             <!-- Step 3 -->
             <div class="wiz-step d-none" data-step="3">
-              <h4 class="mb-2">Vision OCR Model &amp; Optional Assistant LLM</h4>
-              <p class="text-muted small">Pick your required <strong>Vision Model</strong> for OCR. Optionally enable a small local/cloud <strong>Assistant LLM</strong> for auto-tagging, renaming, folder organization, and summaries.</p>
-              <div class="mb-3">
-                <label class="form-label small fw-semibold" for="wizVisionModel">Vision OCR Model (Mandatory)</label>
-                <input id="wizVisionModel" list="wizVisionModelDatalist" type="text" class="form-control form-control-sm" value="glm-ocr" />
-                <datalist id="wizVisionModelDatalist"></datalist>
+              <h4 class="mb-2">Visual Model &amp; Optional Assistant LLM</h4>
+              <p class="text-muted small">Choose a <strong>Visual Model</strong> for OCR, and optionally pick a small local or cloud <strong>Assistant LLM</strong> for auto-tagging, renaming, and summaries.</p>
+
+              <div class="border rounded p-3 mb-3 bg-body-tertiary">
+                <label class="form-label small fw-semibold" for="wizVisualModelSelect">Visual Model (Mandatory)</label>
+                <select id="wizVisualModelSelect" class="form-select form-select-sm"></select>
+                <div id="wizVisualCustomPanel" class="row g-2 mt-2 d-none">
+                  <div class="col-5">
+                    <select id="wizVisualCustomCred" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="col-7">
+                    <input id="wizVisualCustomModel" type="text" class="form-control form-control-sm" placeholder="Custom Visual model name" />
+                  </div>
+                </div>
               </div>
+
               <div id="wizModelCards" class="row g-2 mb-3"></div>
               <div id="wizPullPanel" class="border rounded p-3 bg-body-tertiary mb-3 d-none">
                 <div class="d-flex justify-content-between small mb-1">
@@ -804,18 +1029,21 @@
                   <div id="wizPullBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%;"></div>
                 </div>
               </div>
+
               <div class="border rounded p-3 bg-body-tertiary">
                 <div class="form-check form-switch mb-2">
                   <input id="wizLlmEnabled" class="form-check-input" type="checkbox" />
-                  <label class="form-check-label small fw-semibold" for="wizLlmEnabled">Enable Optional Assistant LLM (Auto-tag, Rename, Organize, Summarize)</label>
+                  <label class="form-check-label small fw-semibold" for="wizLlmEnabled">Enable Optional Assistant LLM (Auto-tag, Rename, Summarize)</label>
                 </div>
-                <div id="wizLlmFields" class="row g-2 opacity-50">
-                  <div class="col-md-5">
-                    <select id="wizLlmProvider" class="form-select form-select-sm" disabled></select>
-                  </div>
-                  <div class="col-md-7">
-                    <input id="wizLlmModel" list="wizLlmModelDatalist" type="text" class="form-control form-control-sm" placeholder="e.g. qwen3:1.7b, llama3.2:3b" disabled />
-                    <datalist id="wizLlmModelDatalist"></datalist>
+                <div id="wizLlmFields" class="opacity-50">
+                  <select id="wizLlmModelSelect" class="form-select form-select-sm" disabled></select>
+                  <div id="wizLlmCustomPanel" class="row g-2 mt-2 d-none">
+                    <div class="col-5">
+                      <select id="wizLlmCustomCred" class="form-select form-select-sm"></select>
+                    </div>
+                    <div class="col-7">
+                      <input id="wizLlmCustomModel" type="text" class="form-control form-control-sm" placeholder="Custom LLM model name" />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -986,6 +1214,46 @@
           <button type="button" class="btn btn-sm btn-primary" id="aiFolderSummaryCopyBtn"><i class="bi bi-clipboard me-1"></i>Copy Summary</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="credentialEditorModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <form class="modal-content" id="credEditForm">
+        <div class="modal-header py-2">
+          <h6 class="modal-title fw-semibold" id="credEditTitle"><i class="bi bi-key me-1"></i> Add Provider Credential</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body small">
+          <input type="hidden" id="credEditId" />
+          <div class="mb-2">
+            <label class="form-label fw-semibold mb-1" for="credEditProvider">Provider Type</label>
+            <select id="credEditProvider" class="form-select form-select-sm"></select>
+          </div>
+          <div class="mb-2">
+            <label class="form-label fw-semibold mb-1" for="credEditName">Unique Credential Name</label>
+            <input id="credEditName" type="text" class="form-control form-control-sm" placeholder="e.g. Ollama Garage Server, DeepSeek Work" required />
+            <div id="credEditNameError" class="text-danger mt-1 d-none"></div>
+          </div>
+          <div class="mb-2">
+            <label class="form-label fw-semibold mb-1" for="credEditBaseUrl">Base URL</label>
+            <input id="credEditBaseUrl" type="url" class="form-control form-control-sm" />
+          </div>
+          <div class="mb-2">
+            <label class="form-label fw-semibold mb-1" for="credEditApiKey">API Key</label>
+            <input id="credEditApiKey" type="password" class="form-control form-control-sm" autocomplete="off" />
+          </div>
+          <div id="credEditEnvHint" class="text-muted mb-2"></div>
+          <div id="credEditTestResult" class="mt-2"></div>
+        </div>
+        <div class="modal-footer py-2 justify-content-between">
+          <button type="button" class="btn btn-sm btn-outline-primary" id="credEditTestBtn">Test Connection</button>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-sm btn-primary" id="credEditSaveBtn">Save Credential</button>
+          </div>
+        </div>
+      </form>
     </div>
   </div>
 
