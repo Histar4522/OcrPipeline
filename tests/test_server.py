@@ -42,7 +42,19 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert "katex" in home.text.lower()
     assert 'id="wizardView"' in home.text
     assert 'id="wizardModal"' not in home.text
-    for elem_id in ("selectFilesBtn", "selectFolderBtn", "clearSelectedFilesBtn", "selectedFilesList"):
+    for elem_id in (
+        "selectFilesBtn",
+        "selectFolderBtn",
+        "clearSelectedFilesBtn",
+        "selectedFilesList",
+        "settingsUpdateCard",
+        "checkUpdatesBtn",
+        "setAutoCheckUpdates",
+        "setAutoUpdate",
+        "releaseHistorySelect",
+        "newReleaseNotes",
+        "releaseHistoryPreview",
+    ):
         assert f'id="{elem_id}"' in home.text
     for val in ("always", "not_in_focus", "minimized", "never"):
         assert f'value="{val}"' in home.text
@@ -62,7 +74,13 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert "runModal" in dialogs_js.text
     assert "hidden.bs.modal" in dialogs_js.text
 
-    for asset in ("/static/app.js", "/static/markdown.js", "/static/dialogs.js", "/static/tag_input.js"):
+    for asset in (
+        "/static/app.js",
+        "/static/markdown.js",
+        "/static/dialogs.js",
+        "/static/tag_input.js",
+        "/static/updates.js",
+    ):
         js = client.get(asset)
         assert js.status_code == 200
         assert js.headers["content-type"].startswith(("application/javascript", "text/javascript"))
@@ -77,7 +95,7 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["setup_completed"] is False
-    assert health.json()["version"] == "0.2.1"
+    assert health.json()["version"] == "0.2.2"
     assert health.json()["license"] == "MIT OR Apache-2.0"
     assert "Weien Xu" in health.json()["copyright"]
 
@@ -482,3 +500,105 @@ def test_job_queue_waiting_classification_and_cancel(tmp_path: Path) -> None:
     assert client.get(f"/api/jobs/{j2}").json()["status"] == "completed"
     assert client.get(f"/api/jobs/{j3}").json()["status"] == "cancelled"
     assert len(processed_labels) == 2
+
+
+def test_updater_version_asset_selection_and_endpoints(tmp_path: Path, monkeypatch: object) -> None:
+    import httpx
+    from ocr_pipeline import updater
+    import ocr_pipeline.web.server as srv
+
+    assert updater.parse_version("v0.2.10") > updater.parse_version("v0.2.2") > updater.parse_version("0.2.1")
+
+    sample_assets = [
+        {"name": "OcrPipeline-0.3.0-x64.msi", "size": 1024, "browser_download_url": "https://github.com/a/b/OcrPipeline-0.3.0-x64.msi"},
+        {"name": "OcrPipeline-0.3.0-linux-x86_64.tar.gz", "size": 2048, "browser_download_url": "https://github.com/a/b/OcrPipeline-0.3.0-linux-x86_64.tar.gz"},
+        {"name": "OcrPipeline-0.3.0-macOS-arm64.dmg", "size": 3072, "browser_download_url": "https://github.com/a/b/OcrPipeline-0.3.0-macOS-arm64.dmg"},
+    ]
+    assert updater.select_release_asset(sample_assets, system="Windows", machine="AMD64")["name"].endswith(".msi")  # type: ignore[index]
+    assert updater.select_release_asset(sample_assets, system="Linux", machine="x86_64")["name"].endswith(".tar.gz")  # type: ignore[index]
+    assert updater.select_release_asset(sample_assets, system="Darwin", machine="arm64")["name"].endswith(".dmg")  # type: ignore[index]
+
+    fake_releases = [
+        {
+            "tag_name": "v9.9.9-draft",
+            "draft": True,
+            "prerelease": False,
+            "body": "hidden",
+            "assets": [],
+        },
+        {
+            "tag_name": "v0.3.0",
+            "name": "OcrPipeline v0.3.0",
+            "body": "### New Features\n- Auto update test",
+            "published_at": "2026-11-18T12:00:00Z",
+            "html_url": "https://github.com/Histar4522/OcrPipeline/releases/tag/v0.3.0",
+            "draft": False,
+            "prerelease": False,
+            "assets": sample_assets,
+        },
+        {
+            "tag_name": "v0.2.2",
+            "name": "OcrPipeline v0.2.2",
+            "body": "Current release notes",
+            "published_at": "2026-11-18T10:00:00Z",
+            "html_url": "https://github.com/Histar4522/OcrPipeline/releases/tag/v0.2.2",
+            "draft": False,
+            "prerelease": False,
+            "assets": [],
+        },
+    ]
+
+    class FakeResp:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> object:
+            return fake_releases
+
+    monkeypatch.setattr(updater.httpx, "get", lambda *a, **k: FakeResp())  # type: ignore[attr-defined]
+
+    checked = updater.fetch_github_releases(current_version="0.2.2")
+    assert checked["update_available"] is True
+    assert checked["latest"]["tag_name"] == "v0.3.0"
+    assert [r["tag_name"] for r in checked["releases"]] == ["v0.3.0", "v0.2.2"]
+    assert checked["releases"][1]["is_current"] is True
+
+    client = _make_test_app(tmp_path)
+    saved = client.put("/api/settings", json={"auto_check_updates": False, "auto_update": True})
+    assert saved.status_code == 200
+    assert saved.json()["auto_check_updates"] is False
+    assert saved.json()["auto_update"] is True
+
+    api_check = client.get("/api/updates/check")
+    assert api_check.status_code == 200
+    assert api_check.json()["latest"]["tag_name"] == "v0.3.0"
+
+    bad_install = client.post("/api/updates/install", json={"tag": "v0.3.0"})
+    assert bad_install.status_code == 400
+
+    # Test untrusted URL rejection and valid download/install flow with mocked stream + Popen
+    launched: list[list[str]] = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **k: launched.append(list(args)))  # type: ignore[attr-defined]
+    monkeypatch.setattr(updater.platform, "system", lambda: "Windows")  # type: ignore[attr-defined]
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"fake-msi-bytes", headers={"content-length": "14"})
+
+    orig_stream = updater.httpx.stream
+    monkeypatch.setattr(
+        updater.httpx,
+        "stream",
+        lambda method, url, **kw: httpx.Client(transport=httpx.MockTransport(mock_handler)).stream(method, url),
+    )  # type: ignore[attr-defined]
+    res = updater.download_and_install_update(
+        "https://github.com/Histar4522/OcrPipeline/releases/download/v0.3.0/OcrPipeline-0.3.0-x64.msi",
+        "OcrPipeline-0.3.0-x64.msi",
+        download_dir=tmp_path / "dl",
+    )
+    monkeypatch.setattr(updater.httpx, "stream", orig_stream)  # type: ignore[attr-defined]
+    assert res["installed"] is True
+    assert launched and launched[0][0] == "msiexec"
+    assert (tmp_path / "dl" / "OcrPipeline-0.3.0-x64.msi").read_bytes() == b"fake-msi-bytes"
+    assert callable(srv.fetch_github_releases)

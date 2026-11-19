@@ -22,6 +22,7 @@ import { renderMarkdownContent } from "./markdown.js";
 import { initModelsView } from "./models.js";
 import { initSettingsAndWizard } from "./settings_wizard.js";
 import { createTagInput } from "./tag_input.js";
+import { initUpdatesView } from "./updates.js";
 
 const state = {
   selectedFiles: [],
@@ -482,6 +483,13 @@ const settingsWizard = initSettingsAndWizard({
   onSettingsSaved: syncSettingsToJobForm,
   onWizardFinished: () => switchView("jobsView"),
 });
+const updatesView = initUpdatesView({
+  showToast,
+  onOpenUpdateSection: () => {
+    switchView("settingsView");
+    el("settingsUpdateCard")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  },
+});
 
 function switchView(target) {
   document.querySelectorAll("#mainNav [data-view]").forEach((b) => {
@@ -492,7 +500,10 @@ function switchView(target) {
   if (target === "jobsView") syncJobArchiveOptions();
   if (target === "artifactsView") artifactsView.refresh();
   if (target === "modelsView") modelsView.refresh();
-  if (target === "settingsView") settingsWizard.loadSettingsForm();
+  if (target === "settingsView") {
+    settingsWizard.loadSettingsForm().then((s) => updatesView.syncSettingsForm(s)).catch(() => {});
+    if (!updatesView.getData()) updatesView.check({ silent: true });
+  }
 }
 
 document.querySelectorAll("#mainNav [data-view]").forEach((btn) => {
@@ -694,6 +705,7 @@ window.addEventListener("pywebviewready", () => syncWindowFocus(document.hasFocu
   syncWindowFocus(document.hasFocus());
   const health = await fetchHealth();
   el("aboutVersion").textContent = `v${health.version}`;
+  el("updateCurrentVersion").textContent = `v${health.version}`;
   el("aboutLicense").textContent = health.license;
   el("aboutCopyright").textContent = health.copyright;
   el("footerVersion").textContent = `OcrPipeline v${health.version}`;
@@ -702,5 +714,16 @@ window.addEventListener("pywebviewready", () => syncWindowFocus(document.hasFocu
   await syncSettingsToJobForm();
   await syncJobArchiveOptions();
   renderJobHistory(await fetchJobs());
-  if (!health.setup_completed) await settingsWizard.openWizard();
+  if (!health.setup_completed) {
+    await settingsWizard.openWizard();
+  } else {
+    fetchSettings()
+      .then((s) => {
+        updatesView.syncSettingsForm(s);
+        if (s.auto_check_updates !== false) {
+          updatesView.check({ silent: true, autoUpdate: Boolean(s.auto_update) });
+        }
+      })
+      .catch(() => {});
+  }
 })();

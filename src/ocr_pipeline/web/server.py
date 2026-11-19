@@ -48,6 +48,7 @@ from ..ollama_client import (
 from ..platform_utils import generate_app_icon_image, get_system_info, open_in_file_manager
 from ..runner import OcrFn, ProgressEvent, run_pipeline
 from ..settings import AppSettings, default_jobs_dir, load_settings, normalize_notification_mode, save_settings
+from ..updater import UpdateError, download_and_install_update, fetch_github_releases
 
 # Ensure .js/.css serve valid MIME types even on Windows where registry maps .js to text/plain
 mimetypes.add_type("application/javascript", ".js")
@@ -256,6 +257,18 @@ def create_app(
         "done": False,
         "error": "",
     }
+    update_state: dict = {
+        "active": False,
+        "tag": "",
+        "status": "idle",
+        "percent": 0.0,
+        "completed_mb": 0.0,
+        "total_mb": 0.0,
+        "done": False,
+        "error": "",
+        "message": "",
+        "path": "",
+    }
     effective_ocr_fn: OcrFn = ocr_fn or ocr_image_b64
 
     def get_settings() -> AppSettings:
@@ -391,12 +404,79 @@ def create_app(
         if current.theme not in ("auto", "light", "dark"):
             current.theme = "auto"
         current.desktop_notifications = normalize_notification_mode(current.desktop_notifications)
+        current.auto_check_updates = bool(current.auto_check_updates)
+        current.auto_update = bool(current.auto_update)
         if not current.archive_dir.strip():
             current.archive_dir = str(AppSettings().archive_dir)
         save_settings(current, settings_path)
         data = current.to_dict()
         data["default_system_prompt"] = DEFAULT_SYSTEM_PROMPT
         return data
+
+    @app.get("/api/updates/check")
+    def check_for_updates() -> dict:
+        try:
+            return fetch_github_releases()
+        except UpdateError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/updates/install")
+    def install_github_update(payload: dict = Body(...)) -> dict:
+        tag = str(payload.get("tag", "")).strip()
+        download_url = str(payload.get("download_url", "")).strip()
+        asset_name = str(payload.get("asset_name", "")).strip()
+        if not download_url or not asset_name:
+            raise HTTPException(status_code=400, detail="download_url and asset_name are required.")
+        with lock:
+            if update_state["active"]:
+                raise HTTPException(status_code=409, detail="An update download is already in progress.")
+            update_state.update(
+                {
+                    "active": True,
+                    "tag": tag,
+                    "status": "downloading",
+                    "percent": 0.0,
+                    "completed_mb": 0.0,
+                    "total_mb": 0.0,
+                    "done": False,
+                    "error": "",
+                    "message": "",
+                    "path": "",
+                }
+            )
+
+        def on_progress(downloaded: int, total: int) -> None:
+            with lock:
+                update_state["completed_mb"] = round(downloaded / (1024 * 1024), 1)
+                update_state["total_mb"] = round(total / (1024 * 1024), 1)
+                if total > 0:
+                    update_state["percent"] = round((downloaded / total) * 100.0, 1)
+
+        def worker() -> None:
+            try:
+                res = download_and_install_update(download_url, asset_name, on_progress=on_progress)
+                with lock:
+                    update_state["active"] = False
+                    update_state["done"] = True
+                    update_state["percent"] = 100.0
+                    update_state["status"] = "completed"
+                    update_state["message"] = str(res.get("message", ""))
+                    update_state["path"] = str(res.get("path", ""))
+            except Exception as exc:
+                with lock:
+                    update_state["active"] = False
+                    update_state["done"] = True
+                    update_state["status"] = "failed"
+                    update_state["error"] = str(exc)
+
+        threading.Thread(target=worker, daemon=True).start()
+        with lock:
+            return dict(update_state)
+
+    @app.get("/api/updates/install-status")
+    def get_update_install_status() -> dict:
+        with lock:
+            return dict(update_state)
 
     @app.get("/api/models")
     def list_models() -> dict:

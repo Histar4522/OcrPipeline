@@ -23,6 +23,14 @@ export const saveSettings = (payload) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+export const checkUpdates = () => requestJson("/api/updates/check");
+export const installUpdate = (payload) =>
+  requestJson("/api/updates/install", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+export const fetchUpdateInstallStatus = () => requestJson("/api/updates/install-status");
 
 export const fetchModels = () => requestJson("/api/models");
 export const startOllama = () => requestJson("/api/ollama/start", { method: "POST" });
