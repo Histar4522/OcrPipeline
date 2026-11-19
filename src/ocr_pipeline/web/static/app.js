@@ -721,7 +721,7 @@ window.addEventListener("pywebviewready", () => syncWindowFocus(document.hasFocu
       .then((s) => {
         updatesView.syncSettingsForm(s);
         if (s.auto_check_updates !== false) {
-          updatesView.check({ silent: true, autoUpdate: Boolean(s.auto_update) });
+          updatesView.check({ silent: true });
         }
       })
       .catch(() => {});

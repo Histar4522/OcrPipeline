@@ -8,6 +8,7 @@ import time
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from ocr_pipeline import __version__
 from ocr_pipeline.config import OcrConfig
 from ocr_pipeline.settings import AppSettings, save_settings
 from ocr_pipeline.web.server import create_app
@@ -42,6 +43,7 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     assert "katex" in home.text.lower()
     assert 'id="wizardView"' in home.text
     assert 'id="wizardModal"' not in home.text
+    assert 'id="setAutoUpdate"' not in home.text
     for elem_id in (
         "selectFilesBtn",
         "selectFolderBtn",
@@ -49,8 +51,8 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
         "selectedFilesList",
         "settingsUpdateCard",
         "checkUpdatesBtn",
+        "installUpdateBtn",
         "setAutoCheckUpdates",
-        "setAutoUpdate",
         "releaseHistorySelect",
         "newReleaseNotes",
         "releaseHistoryPreview",
@@ -95,7 +97,7 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["setup_completed"] is False
-    assert health.json()["version"] == "0.2.2"
+    assert health.json()["version"] == __version__
     assert health.json()["license"] == "MIT OR Apache-2.0"
     assert "Weien Xu" in health.json()["copyright"]
 
@@ -566,10 +568,10 @@ def test_updater_version_asset_selection_and_endpoints(tmp_path: Path, monkeypat
     assert checked["releases"][1]["is_current"] is True
 
     client = _make_test_app(tmp_path)
-    saved = client.put("/api/settings", json={"auto_check_updates": False, "auto_update": True})
+    saved = client.put("/api/settings", json={"auto_check_updates": False})
     assert saved.status_code == 200
     assert saved.json()["auto_check_updates"] is False
-    assert saved.json()["auto_update"] is True
+    assert "auto_update" not in saved.json()
 
     api_check = client.get("/api/updates/check")
     assert api_check.status_code == 200

@@ -57,14 +57,12 @@ class AppSettings:
     obsidian_mode: bool = False
     theme: str = "auto"
     auto_check_updates: bool = True
-    auto_update: bool = False
 
     def __post_init__(self) -> None:
         if not self.archive_dir:
             self.archive_dir = str(default_archive_dir())
         self.desktop_notifications = normalize_notification_mode(self.desktop_notifications)
         self.auto_check_updates = bool(self.auto_check_updates)
-        self.auto_update = bool(self.auto_update)
 
     def to_dict(self) -> dict:
         return asdict(self)

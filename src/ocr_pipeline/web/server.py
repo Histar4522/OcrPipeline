@@ -405,7 +405,6 @@ def create_app(
             current.theme = "auto"
         current.desktop_notifications = normalize_notification_mode(current.desktop_notifications)
         current.auto_check_updates = bool(current.auto_check_updates)
-        current.auto_update = bool(current.auto_update)
         if not current.archive_dir.strip():
             current.archive_dir = str(AppSettings().archive_dir)
         save_settings(current, settings_path)

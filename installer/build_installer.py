@@ -59,6 +59,8 @@ def package_windows_msi() -> Path:
             arch,
             "-ext",
             "WixToolset.UI.wixext",
+            "-d",
+            f"AppVersion={__version__}",
             "-o",
             str(msi_out),
             str(ROOT / "installer" / "windows" / "OcrPipeline.wxs"),
