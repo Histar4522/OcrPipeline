@@ -60,10 +60,12 @@ def test_web_ui_serves_html_health_and_models(tmp_path: Path) -> None:
         "releaseHistoryPreview",
         "jobVisualModelSelect",
         "jobAiOptionsBox",
+        "jobAutoCleanup",
         "artifactAiBtn",
         "aiFolderSummaryBtn",
         "visualConfigPane",
         "llmConfigPane",
+        "roleAutoCleanup",
         "credentialsPane",
         "localOllamaPane",
         "visualModelSelect",
@@ -942,3 +944,159 @@ def test_recent_tags_ordering_and_suggestion_limit(tmp_path: Path) -> None:
     assert "maxSuggestions = 3" in tag_js.text
     assert "available.slice(0, maxSuggestions)" in tag_js.text
     assert "slice(0, 12)" not in tag_js.text
+
+
+def test_post_ocr_ai_cleanup_order_and_cancellation(tmp_path: Path, monkeypatch: object) -> None:
+    import json
+    from ocr_pipeline.ollama_client import JobCancelledError
+    import ocr_pipeline.web.server as srv
+
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir(parents=True)
+
+    def fake_ocr(image_b64: str, cfg: OcrConfig, client: object) -> str:
+        return "<!-- Page 1 -->\n\nBrken OCR wrod."
+
+    client = _make_test_app(tmp_path, ocr_fn=fake_ocr)
+
+    # auto_cleanup_on_ocr defaults to False and persists via /api/settings
+    assert client.get("/api/settings").json()["auto_cleanup_on_ocr"] is False
+    saved_pref = client.put(
+        "/api/settings",
+        json={"llm_enabled": True, "llm_provider": "ollama", "llm_model": "qwen3:1.7b", "auto_cleanup_on_ocr": True},
+    )
+    assert saved_pref.status_code == 200
+    assert saved_pref.json()["auto_cleanup_on_ocr"] is True
+
+    order: list[str] = []
+    analyzed_inputs: list[str] = []
+
+    def fake_cleanup(text: str, endpoint: object, **kw: object) -> str:
+        order.append("cleanup")
+        cb = kw.get("on_progress")
+        if callable(cb):
+            cb(1, 1, "Page 1")
+        return text.replace("Brken OCR wrod.", "Clean OCR word.")
+
+    def fake_analyze(text: str, **kw: object) -> dict:
+        order.append("analyze")
+        analyzed_inputs.append(text)
+        return {"tags": ["cleaned-note"], "filename": "Cleaned_Note.md", "summary": "Clean summary."}
+
+    monkeypatch.setattr(srv, "cleanup_ocr_markdown", fake_cleanup)  # type: ignore[attr-defined]
+    monkeypatch.setattr(srv, "analyze_artifact_all", fake_analyze)  # type: ignore[attr-defined]
+
+    # Case 1: auto_cleanup + auto_tag + auto_summarize + auto_rename -> cleanup runs BEFORE analyze
+    r1 = client.post(
+        "/api/jobs",
+        data={
+            "source_mode": "upload",
+            "auto_cleanup": "true",
+            "auto_tag": "true",
+            "auto_summarize": "true",
+            "auto_rename": "true",
+        },
+        files=[("files", ("doc1.png", _png_bytes(), "image/png"))],
+    )
+    assert r1.status_code == 200
+    j1 = r1.json()["job_id"]
+    deadline = time.time() + 5.0
+    st1 = r1.json()
+    while st1["status"] not in ("completed", "failed") and time.time() < deadline:
+        time.sleep(0.05)
+        st1 = client.get(f"/api/jobs/{j1}").json()
+
+    assert st1["status"] == "completed"
+    assert order == ["cleanup", "analyze"]
+    assert "Clean OCR word." in analyzed_inputs[0]
+    assert "Brken OCR wrod." not in analyzed_inputs[0]
+    cleaned_md = (archive_dir / "Cleaned_Note.md").read_text(encoding="utf-8")
+    assert "Clean OCR word." in cleaned_md
+    meta = json.loads((archive_dir / "Cleaned_Note.md.meta").read_text(encoding="utf-8"))
+    assert meta["tags"] == ["cleaned-note"]
+    assert meta["summary"] == "Clean summary."
+    assert "LLM CLEANUP" in client.get(f"/api/jobs/{j1}/log").text
+
+    # Case 2: auto_cleanup ONLY skips analyze_artifact_all while cleaning the file
+    order.clear()
+    r2 = client.post(
+        "/api/jobs",
+        data={
+            "source_mode": "upload",
+            "job_name": "Only_Cleanup",
+            "auto_cleanup": "true",
+            "auto_tag": "false",
+            "auto_summarize": "false",
+            "auto_rename": "false",
+        },
+        files=[("files", ("doc2.png", _png_bytes(), "image/png"))],
+    )
+    j2 = r2.json()["job_id"]
+    deadline = time.time() + 5.0
+    st2 = r2.json()
+    while st2["status"] not in ("completed", "failed") and time.time() < deadline:
+        time.sleep(0.05)
+        st2 = client.get(f"/api/jobs/{j2}").json()
+    assert st2["status"] == "completed"
+    assert order == ["cleanup"]
+    assert "Clean OCR word." in (archive_dir / "Only_Cleanup.md").read_text(encoding="utf-8")
+
+    # Case 3: cleanup error leaves raw OCR untouched and logs LLM WARN without failing job
+    monkeypatch.setattr(srv, "cleanup_ocr_markdown", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("cleanup timeout")))  # type: ignore[attr-defined]
+    r3 = client.post(
+        "/api/jobs",
+        data={
+            "source_mode": "upload",
+            "job_name": "Cleanup_Error_Keep_Raw",
+            "auto_cleanup": "true",
+            "auto_tag": "false",
+            "auto_summarize": "false",
+            "auto_rename": "false",
+        },
+        files=[("files", ("doc3.png", _png_bytes(), "image/png"))],
+    )
+    j3 = r3.json()["job_id"]
+    deadline = time.time() + 5.0
+    st3 = r3.json()
+    while st3["status"] not in ("completed", "failed") and time.time() < deadline:
+        time.sleep(0.05)
+        st3 = client.get(f"/api/jobs/{j3}").json()
+    assert st3["status"] == "completed"
+    assert "Brken OCR wrod." in (archive_dir / "Cleanup_Error_Keep_Raw.md").read_text(encoding="utf-8")
+    assert "LLM WARN" in client.get(f"/api/jobs/{j3}/log").text
+
+    # Case 4: cancelling during cleanup leaves raw OCR untouched and sets job status to cancelled
+    cleanup_entered = threading.Event()
+
+    def slow_cancellable_cleanup(text: str, endpoint: object, **kw: object) -> str:
+        ev = kw.get("cancel_event")
+        cleanup_entered.set()
+        if isinstance(ev, threading.Event):
+            ev.wait(timeout=3.0)
+        raise JobCancelledError("Cancelled by user.")
+
+    monkeypatch.setattr(srv, "cleanup_ocr_markdown", slow_cancellable_cleanup)  # type: ignore[attr-defined]
+    r4 = client.post(
+        "/api/jobs",
+        data={
+            "source_mode": "upload",
+            "job_name": "Cleanup_Cancel",
+            "auto_cleanup": "true",
+            "auto_tag": "false",
+            "auto_summarize": "false",
+            "auto_rename": "false",
+        },
+        files=[("files", ("doc4.png", _png_bytes(), "image/png"))],
+    )
+    j4 = r4.json()["job_id"]
+    assert cleanup_entered.wait(timeout=3.0)
+    assert client.post(f"/api/jobs/{j4}/cancel").status_code == 200
+
+    deadline = time.time() + 4.0
+    st4 = client.get(f"/api/jobs/{j4}").json()
+    while st4["status"] not in ("cancelled", "completed", "failed") and time.time() < deadline:
+        time.sleep(0.05)
+        st4 = client.get(f"/api/jobs/{j4}").json()
+    assert st4["status"] == "cancelled"
+    assert "Brken OCR wrod." in (archive_dir / "Cleanup_Cancel.md").read_text(encoding="utf-8")
+    assert "LLM CLEANUP CANCELLED" in client.get(f"/api/jobs/{j4}/log").text

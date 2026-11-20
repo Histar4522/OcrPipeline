@@ -177,6 +177,7 @@ class AppSettings:
     auto_organize_on_ocr: bool = False
     auto_organize_allow_new_folders: bool = False
     auto_summarize_on_ocr: bool = True
+    auto_cleanup_on_ocr: bool = False
     archive_dir: str = ""
     dpi: int = 220
     max_image_dim: int = 1536
@@ -235,6 +236,7 @@ class AppSettings:
         self.auto_organize_on_ocr = bool(self.auto_organize_on_ocr)
         self.auto_organize_allow_new_folders = bool(self.auto_organize_allow_new_folders)
         self.auto_summarize_on_ocr = bool(self.auto_summarize_on_ocr)
+        self.auto_cleanup_on_ocr = bool(self.auto_cleanup_on_ocr)
 
     def to_dict(self) -> dict:
         return asdict(self)

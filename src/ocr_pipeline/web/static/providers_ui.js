@@ -201,6 +201,7 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
     el("roleAutoTag").disabled = !enabled;
     el("roleAutoSummarize").disabled = !enabled;
     el("roleAutoRename").disabled = !enabled;
+    el("roleAutoCleanup").disabled = !enabled;
     el("roleLlmAutoCtx").disabled = !enabled;
     el("sideLlmBadge").textContent = enabled ? "On" : "Off";
   }
@@ -578,6 +579,7 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
     el("roleAutoTag").checked = Boolean(settings.auto_tag_on_ocr);
     el("roleAutoSummarize").checked = Boolean(settings.auto_summarize_on_ocr);
     el("roleAutoRename").checked = Boolean(settings.auto_rename_on_ocr);
+    el("roleAutoCleanup").checked = Boolean(settings.auto_cleanup_on_ocr);
     el("roleLlmAutoCtx").checked = settings.llm_auto_ctx !== false;
 
     renderRoleSelectors();
@@ -640,6 +642,7 @@ export function initProvidersAndModelsView({ showToast, onProvidersChanged }) {
       auto_tag_on_ocr: el("roleAutoTag").checked,
       auto_summarize_on_ocr: el("roleAutoSummarize").checked,
       auto_rename_on_ocr: el("roleAutoRename").checked,
+      auto_cleanup_on_ocr: el("roleAutoCleanup").checked,
       llm_auto_ctx: el("roleLlmAutoCtx").checked,
     });
     showToast("LLM Config Saved", enabled ? `${choice.model} (${choice.credentialName})` : "Assistant LLM disabled.", "success");

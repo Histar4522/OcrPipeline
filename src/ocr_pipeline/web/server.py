@@ -13,6 +13,7 @@ import secrets
 import shutil
 import sys
 import threading
+import time
 import uuid
 import zipfile
 
@@ -48,6 +49,7 @@ from ..llm_features import (
     summarize_folder_contents,
 )
 from ..ollama_client import (
+    JobCancelledError,
     OllamaError,
     ProviderError,
     check_ollama_ready,
@@ -382,60 +384,136 @@ def create_app(
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(f"{stamp} [INFO] {line}\n")
 
+    def _has_pending_post_llm(state: JobState, cfg: AppSettings) -> bool:
+        if resolve_llm_endpoint(cfg) is None:
+            return False
+        opts = state.post_llm
+        return any(bool(opts.get(k)) for k in ("auto_cleanup", "auto_tag", "auto_rename", "auto_summarize"))
+
     def _apply_post_ocr_llm(state: JobState, cfg: AppSettings) -> None:
         llm_endpoint = resolve_llm_endpoint(cfg)
         opts = state.post_llm
+        do_cleanup = bool(opts.get("auto_cleanup"))
         do_tag = bool(opts.get("auto_tag"))
         do_rename = bool(opts.get("auto_rename"))
         do_summarize = bool(opts.get("auto_summarize"))
-        if llm_endpoint is None or not (do_tag or do_rename or do_summarize):
+        do_analyze = do_tag or do_rename or do_summarize
+        if llm_endpoint is None or not (do_cleanup or do_analyze):
             return
 
-        archive_base = (state.archive_root or state.output_dir).resolve()
-        index = scan_artifacts(archive_base)
-        known_tags = [str(t["name"]) for t in (index.get("tags") or [])]
+        known_tags: list[str] = []
+        if do_analyze:
+            archive_base = (state.archive_root or state.output_dir).resolve()
+            index = scan_artifacts(archive_base)
+            known_tags = [str(t["name"]) for t in (index.get("tags") or [])]
         multi_doc = len(state.expected_files) != 1
 
-        for idx, md_path in enumerate(list(state.expected_files)):
-            if state.cancel_event.is_set() or not md_path.is_file():
-                continue
-            try:
+        http_client = httpx.Client(timeout=llm_endpoint.timeout_seconds)
+        with lock:
+            state.active_client = http_client
+        try:
+            for idx, md_path in enumerate(list(state.expected_files)):
+                if state.cancel_event.is_set():
+                    break
+                if not md_path.is_file():
+                    continue
                 raw_text = md_path.read_text(encoding="utf-8", errors="replace")
-                res = analyze_artifact_all(
-                    raw_text,
-                    current_name=md_path.name,
-                    known_tags=known_tags,
-                    endpoint=llm_endpoint,
-                )
-                if do_tag and res["tags"]:
-                    merged_tags = normalize_tags(list(state.tags) + list(res["tags"]))
-                    update_artifact_tags(md_path, merged_tags)
-                    for t in merged_tags:
-                        if t not in known_tags:
-                            known_tags.append(t)
-                if do_summarize and res["summary"]:
-                    update_artifact_summary(md_path, res["summary"])
 
-                dst_name = md_path.name
-                if do_rename and (multi_doc or not opts.get("explicit_name")) and res["filename"]:
-                    dst_name = res["filename"]
+                if do_cleanup:
+                    slice_total = 1
+                    t0 = time.perf_counter()
 
-                final_path = md_path
-                if dst_name != md_path.name:
-                    final_path = _unique_output_path(md_path.parent / dst_name)
-                    md_path.rename(final_path)
-                    move_artifact_sidecar(md_path, final_path)
+                    def on_cleanup_progress(
+                        sl_idx: int, sl_total: int, label: str, *, _name: str = md_path.name
+                    ) -> None:
+                        nonlocal slice_total
+                        slice_total = sl_total
+                        with lock:
+                            state.current_doc = f"AI Cleanup: {_name} ({label})"
+                            state.current_page = sl_idx
+                            state.total_pages = sl_total
+
+                    try:
+                        cleaned_text = cleanup_ocr_markdown(
+                            raw_text,
+                            llm_endpoint,
+                            client=http_client,
+                            cancel_event=state.cancel_event,
+                            on_progress=on_cleanup_progress,
+                        )
+                        if state.cancel_event.is_set():
+                            _append_job_log(
+                                state,
+                                f"LLM CLEANUP CANCELLED ({md_path.name}): preserved original OCR output",
+                            )
+                            break
+                        if cleaned_text.strip():
+                            md_path.write_text(cleaned_text, encoding="utf-8")
+                            raw_text = cleaned_text
+                            _append_job_log(
+                                state,
+                                f"LLM CLEANUP ({llm_endpoint.provider_id}/{llm_endpoint.model}): {md_path.name} "
+                                f"(slices={slice_total}, {time.perf_counter() - t0:.2f}s)",
+                            )
+                            _clear_role_error("llm")
+                    except JobCancelledError:
+                        _append_job_log(
+                            state,
+                            f"LLM CLEANUP CANCELLED ({md_path.name}): preserved original OCR output",
+                        )
+                        break
+                    except Exception as exc:
+                        _record_role_error("llm", llm_endpoint.credential_id, exc)
+                        _append_job_log(state, f"LLM WARN ({md_path.name} cleanup): {exc}")
+
+                if do_analyze and not state.cancel_event.is_set():
                     with lock:
-                        state.expected_files[idx] = final_path.resolve()
+                        state.current_doc = f"AI Metadata: {md_path.name}"
+                    try:
+                        res = analyze_artifact_all(
+                            raw_text,
+                            current_name=md_path.name,
+                            known_tags=known_tags,
+                            endpoint=llm_endpoint,
+                            client=http_client,
+                            cancel_event=state.cancel_event,
+                        )
+                        if do_tag and res["tags"]:
+                            merged_tags = normalize_tags(list(state.tags) + list(res["tags"]))
+                            update_artifact_tags(md_path, merged_tags)
+                            for t in merged_tags:
+                                if t not in known_tags:
+                                    known_tags.append(t)
+                        if do_summarize and res["summary"]:
+                            update_artifact_summary(md_path, res["summary"])
 
-                _append_job_log(
-                    state,
-                    f"LLM POST ({llm_endpoint.provider_id}/{llm_endpoint.model}): {md_path.name} -> {state._rel_path(final_path)} tags={res['tags']}",
-                )
-                _clear_role_error("llm")
-            except Exception as exc:
-                _record_role_error("llm", llm_endpoint.credential_id, exc)
-                _append_job_log(state, f"LLM WARN ({md_path.name}): {exc}")
+                        dst_name = md_path.name
+                        if do_rename and (multi_doc or not opts.get("explicit_name")) and res["filename"]:
+                            dst_name = res["filename"]
+
+                        final_path = md_path
+                        if dst_name != md_path.name:
+                            final_path = _unique_output_path(md_path.parent / dst_name)
+                            md_path.rename(final_path)
+                            move_artifact_sidecar(md_path, final_path)
+                            with lock:
+                                state.expected_files[idx] = final_path.resolve()
+
+                        _append_job_log(
+                            state,
+                            f"LLM POST ({llm_endpoint.provider_id}/{llm_endpoint.model}): {md_path.name} -> {state._rel_path(final_path)} tags={res['tags']}",
+                        )
+                        _clear_role_error("llm")
+                    except JobCancelledError:
+                        break
+                    except Exception as exc:
+                        _record_role_error("llm", llm_endpoint.credential_id, exc)
+                        _append_job_log(state, f"LLM WARN ({md_path.name}): {exc}")
+        finally:
+            with lock:
+                if state.active_client is http_client:
+                    state.active_client = None
+            http_client.close()
 
     def _execute_job(state: JobState, tasks: list[DocumentTask], config: OcrConfig) -> None:
         with lock:
@@ -445,6 +523,11 @@ def create_app(
             state.status = "running"
 
         def on_progress(ev: ProgressEvent) -> None:
+            keep_running = (
+                ev.status == "completed"
+                and ev.completed_docs > ev.skipped_docs
+                and _has_pending_post_llm(state, get_settings())
+            )
             with lock:
                 state.total_docs = ev.total_docs
                 state.completed_docs = ev.completed_docs
@@ -455,7 +538,7 @@ def create_app(
                 state.total_pages = ev.total_pages
                 state.elapsed_seconds = ev.elapsed_seconds
                 state.eta_seconds = ev.eta_seconds
-                state.status = ev.status
+                state.status = "running" if keep_running else ev.status
 
         def on_client_ready(client: httpx.Client) -> None:
             with lock:
@@ -481,7 +564,7 @@ def create_app(
                 state.completed_docs = summary.processed_docs + summary.skipped_docs
                 state.skipped_docs = summary.skipped_docs
                 state.failed_pages = summary.failed_pages
-                state.status = "cancelled" if summary.cancelled else "completed"
+                state.status = "cancelled" if (summary.cancelled or state.cancel_event.is_set()) else "completed"
             if not summary.cancelled and summary.processed_docs > 0 and summary.failed_pages == 0:
                 _clear_role_error("vision")
         except Exception as exc:
@@ -628,6 +711,7 @@ def create_app(
         current.auto_organize_on_ocr = bool(current.auto_organize_on_ocr)
         current.auto_organize_allow_new_folders = bool(current.auto_organize_allow_new_folders)
         current.auto_summarize_on_ocr = bool(current.auto_summarize_on_ocr)
+        current.auto_cleanup_on_ocr = bool(current.auto_cleanup_on_ocr)
         if not current.vision_model.strip():
             current.vision_model = "glm-ocr"
         current.default_model = current.vision_model
@@ -1359,6 +1443,7 @@ def create_app(
         auto_rename: bool | None = Form(None),
         auto_organize: bool | None = Form(None),
         auto_summarize: bool | None = Form(None),
+        auto_cleanup: bool | None = Form(None),
         selected_paths: str = Form(""),
         files: list[UploadFile] = File(default=[]),
     ) -> dict:
@@ -1454,6 +1539,7 @@ def create_app(
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         post_llm = {
+            "auto_cleanup": settings.auto_cleanup_on_ocr if auto_cleanup is None else auto_cleanup,
             "auto_tag": settings.auto_tag_on_ocr if auto_tag is None else auto_tag,
             "auto_rename": settings.auto_rename_on_ocr if auto_rename is None else auto_rename,
             "auto_organize": settings.auto_organize_on_ocr if auto_organize is None else auto_organize,

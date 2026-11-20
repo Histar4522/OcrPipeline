@@ -189,7 +189,7 @@
                     <span class="fw-semibold"><i class="bi bi-stars text-primary me-1"></i>AI Post-Processing</span>
                     <span id="jobAiStatusHint" class="text-muted">Optional LLM not configured</span>
                   </div>
-                  <div class="d-flex flex-wrap gap-3">
+                  <div class="d-flex flex-wrap column-gap-3 row-gap-1">
                     <div class="form-check form-check-inline mb-0 me-0">
                       <input id="jobAutoTag" class="form-check-input" type="checkbox" disabled />
                       <label class="form-check-label" for="jobAutoTag">Auto-tag</label>
@@ -201,6 +201,10 @@
                     <div class="form-check form-check-inline mb-0 me-0">
                       <input id="jobAutoRename" class="form-check-input" type="checkbox" disabled />
                       <label class="form-check-label" for="jobAutoRename">Auto-rename</label>
+                    </div>
+                    <div class="form-check form-check-inline mb-0 me-0">
+                      <input id="jobAutoCleanup" class="form-check-input" type="checkbox" disabled />
+                      <label class="form-check-label" for="jobAutoCleanup" title="Proofread and clean up OCR typos, broken line breaks, tables, and LaTeX page-by-page">AI Cleanup</label>
                     </div>
                   </div>
                 </div>
@@ -583,6 +587,10 @@
                   <div class="form-check mb-0">
                     <input id="roleAutoRename" class="form-check-input" type="checkbox" />
                     <label class="form-check-label" for="roleAutoRename">Auto-rename</label>
+                  </div>
+                  <div class="form-check mb-0">
+                    <input id="roleAutoCleanup" class="form-check-input" type="checkbox" />
+                    <label class="form-check-label" for="roleAutoCleanup">AI Cleanup (proofread OCR)</label>
                   </div>
                 </div>
                 <div class="border-top pt-2">

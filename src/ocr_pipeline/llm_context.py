@@ -30,7 +30,8 @@ CONTEXT_BUCKETS: tuple[int, ...] = (
 _PARAM_SIZE_RE = re.compile(r"(?:^|[:\-_/@])(\d+(?:\.\d+)?)\s*([bm])\b", re.IGNORECASE)
 _QUANT_BITS_RE = re.compile(r"\b(f16|fp16|bf16|q8(?:_\d+)?|q6_[k\d]+|q5_[k\d]+|q4_[k\d]+|q3_[k\d]+|q2_[k\d]+)\b", re.IGNORECASE)
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-_PAGE_MARKER_RE = re.compile(r"^<!--\s*Page\s+\d+.*?-->$", re.IGNORECASE)
+_PAGE_MARKER_RE = re.compile(r"^<!--\s*Page\s+(\d+)\b.*?-->$", re.IGNORECASE)
+_OCR_ERROR_MARKER_RE = re.compile(r"^<!--\s*OCR\s+ERROR\b.*?-->$", re.IGNORECASE)
 
 _SYS_CACHE_LOCK = threading.Lock()
 _SYS_CACHE: dict[str, object] = {"ts": 0.0, "data": None}
@@ -82,6 +83,19 @@ class ContextSelection:
     estimated_vram_gb: float
     estimated_prompt_tokens: int
     max_single_pass_input_tokens: int
+    needs_splitting: bool
+    vram_plan: VramPlan
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupBudget:
+    """Context window and max-output-bounded slice budget for OCR proofreading."""
+
+    chosen_num_ctx: int
+    max_output_tokens: int
+    max_slice_input_tokens: int
+    estimated_vram_gb: float
+    body_tokens: int
     needs_splitting: bool
     vram_plan: VramPlan
 
@@ -599,3 +613,275 @@ def split_markdown_chunks(
     for item in chunks:
         item["total"] = total
     return chunks
+
+
+def estimate_model_max_output_tokens(provider_id: str, model: str, chosen_num_ctx: int) -> int:
+    """Return conservative per-request output token ceiling for `provider_id`/`model`."""
+    spec = get_provider_spec(provider_id)
+    lower = (model or "").strip().lower()
+    if spec.is_local:
+        params_b = parse_model_params_b(model)
+        raw_cap = 4096 if params_b <= 4.5 else 8192
+        raw_cap = min(raw_cap, max(1024, chosen_num_ctx // 2))
+    elif spec.id == "openai":
+        raw_cap = 16384 if any(tok in lower for tok in ("gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4")) else 4096
+    elif spec.id == "anthropic":
+        raw_cap = 4096 if any(tok in lower for tok in ("claude-3-opus", "claude-3-sonnet", "claude-3-haiku")) else 8192
+    elif spec.id in ("google", "deepseek", "xai", "qwen"):
+        raw_cap = 8192
+    else:
+        raw_cap = 4096
+    return max(512, min(raw_cap, max(512, chosen_num_ctx - 512)))
+
+
+def compute_cleanup_budgets(
+    endpoint: ProviderEndpoint,
+    body: str,
+    *,
+    system_prompt_tokens: int = 160,
+    system_info: dict | None = None,
+) -> CleanupBudget:
+    """Compute cleanup slice input budget bounded by both `num_ctx` and model max output tokens."""
+    spec = get_provider_spec(endpoint.provider_id)
+    body_tokens = estimate_tokens(body)
+    cap_ctx = 16384 if spec.is_local else 32768
+    est_out = min(8192 if spec.is_local else 16384, max(1024, int(body_tokens * 1.25) + 384))
+    selection = choose_adequate_context(
+        endpoint,
+        body,
+        expected_output_tokens=est_out,
+        system_info=system_info,
+        max_cap_ctx=cap_ctx,
+    )
+    chosen_ctx = selection.chosen_num_ctx
+    max_out = estimate_model_max_output_tokens(endpoint.provider_id, endpoint.model, chosen_ctx)
+    ctx_input_limit = int((chosen_ctx - system_prompt_tokens - 240) / 2.25)
+    out_input_limit = int((max_out - 256) / 1.25)
+    max_slice_input = max(400, min(ctx_input_limit, out_input_limit))
+    needs_splitting = body_tokens > max_slice_input
+
+    if endpoint.auto_ctx and needs_splitting:
+        min_floor = 4096 if selection.vram_plan.recommended_max_ctx >= 4096 else 2048
+        for bucket in CONTEXT_BUCKETS:
+            if bucket < min_floor or bucket >= chosen_ctx:
+                continue
+            b_max_out = estimate_model_max_output_tokens(endpoint.provider_id, endpoint.model, bucket)
+            b_ctx_input = int((bucket - system_prompt_tokens - 240) / 2.25)
+            if (
+                b_max_out >= max_out
+                and b_ctx_input >= max_slice_input
+                and bucket >= max_slice_input + system_prompt_tokens + max_out + 256
+            ):
+                chosen_ctx = bucket
+                break
+
+    profile = build_model_memory_profile(endpoint.provider_id, endpoint.model)
+    est_vram = 0.0 if not selection.vram_plan.is_local else estimate_vram_gb_for_ctx(profile, chosen_ctx)
+    return CleanupBudget(
+        chosen_num_ctx=chosen_ctx,
+        max_output_tokens=max_out,
+        max_slice_input_tokens=max_slice_input,
+        estimated_vram_gb=est_vram,
+        body_tokens=body_tokens,
+        needs_splitting=needs_splitting,
+        vram_plan=selection.vram_plan,
+    )
+
+
+def _is_ocr_error_only(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    return bool(lines) and all(_OCR_ERROR_MARKER_RE.match(line) for line in lines)
+
+
+def split_markdown_pages_for_cleanup(body: str, max_slice_tokens: int) -> list[dict]:
+    """Slice Markdown cleanly along `<!-- Page N -->` boundaries within `max_slice_tokens`.
+
+    Adjacent pages are packed together when they fit within budget so small pages share
+    one request, while oversized single pages or non-paginated documents fall back to
+    `split_markdown_chunks`.
+    """
+    clean = (body or "").strip()
+    if not clean:
+        return []
+    safe_limit = max(400, int(max_slice_tokens))
+
+    raw_segments: list[tuple[int | None, str, list[str]]] = []
+    cur_page_num: int | None = None
+    cur_marker = ""
+    cur_lines: list[str] = []
+    has_page_markers = False
+    uses_hr_separator = False
+    in_fence = False
+
+    def trim_blank_edges(lines: list[str]) -> list[str]:
+        start = 0
+        end = len(lines)
+        while start < end and not lines[start].strip():
+            start += 1
+        while end > start and not lines[end - 1].strip():
+            end -= 1
+        return lines[start:end]
+
+    for line in clean.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            cur_lines.append(line)
+            continue
+        if not in_fence:
+            marker_match = _PAGE_MARKER_RE.match(stripped)
+            if marker_match:
+                has_page_markers = True
+                if cur_marker or any(item.strip() for item in cur_lines):
+                    while cur_lines and not cur_lines[-1].strip():
+                        cur_lines.pop()
+                    if cur_lines and cur_lines[-1].strip() == "---":
+                        cur_lines.pop()
+                        uses_hr_separator = True
+                        while cur_lines and not cur_lines[-1].strip():
+                            cur_lines.pop()
+                    trimmed = trim_blank_edges(cur_lines)
+                    if cur_marker or trimmed:
+                        raw_segments.append((cur_page_num, cur_marker, trimmed))
+                cur_page_num = int(marker_match.group(1))
+                cur_marker = stripped
+                cur_lines = []
+                continue
+        cur_lines.append(line)
+
+    if not has_page_markers:
+        body_tokens = estimate_tokens(clean)
+        if body_tokens <= safe_limit:
+            return [
+                {
+                    "index": 1,
+                    "total": 1,
+                    "page_label": "Page 1",
+                    "text": clean,
+                    "tokens": body_tokens,
+                    "join_with_hr": False,
+                    "skip_llm": _is_ocr_error_only(clean),
+                    "heading_context": "",
+                }
+            ]
+        chunks = split_markdown_chunks(clean, max_chunk_tokens=safe_limit, overlap_tokens=0)
+        return [
+            {
+                "index": c["index"],
+                "total": c["total"],
+                "page_label": f"Part {c['index']}/{c['total']}",
+                "text": c["text"],
+                "tokens": c["tokens"],
+                "join_with_hr": False,
+                "skip_llm": False,
+                "heading_context": c.get("heading_context", ""),
+            }
+            for c in chunks
+        ]
+
+    trimmed_tail = trim_blank_edges(cur_lines)
+    if cur_marker or trimmed_tail:
+        raw_segments.append((cur_page_num, cur_marker, trimmed_tail))
+
+    page_sep = "\n\n---\n\n" if uses_hr_separator else "\n\n"
+    pages: list[dict] = []
+    for pnum, marker, lines in raw_segments:
+        body_text = "\n".join(lines).strip()
+        full_text = f"{marker}\n\n{body_text}" if (marker and body_text) else (marker or body_text)
+        pages.append(
+            {
+                "page_num": pnum,
+                "marker": marker,
+                "body": body_text,
+                "full_text": full_text,
+                "skip_llm": bool(marker) and _is_ocr_error_only(body_text),
+            }
+        )
+
+    slices: list[dict] = []
+    cur_group: list[dict] = []
+
+    def _group_label(group: list[dict]) -> str:
+        nums = [p["page_num"] for p in group if p["page_num"] is not None]
+        if not nums:
+            return "Preamble"
+        if len(nums) == 1:
+            return f"Page {nums[0]}"
+        return f"Pages {nums[0]}-{nums[-1]}"
+
+    def _flush_group() -> None:
+        if not cur_group:
+            return
+        joined = page_sep.join(p["full_text"] for p in cur_group)
+        slices.append(
+            {
+                "page_label": _group_label(cur_group),
+                "text": joined,
+                "tokens": estimate_tokens(joined),
+                "join_with_hr": uses_hr_separator and bool(slices),
+                "skip_llm": False,
+                "heading_context": "",
+            }
+        )
+        cur_group.clear()
+
+    for page in pages:
+        if page["skip_llm"]:
+            _flush_group()
+            label = f"Page {page['page_num']}" if page["page_num"] is not None else "Preamble"
+            slices.append(
+                {
+                    "page_label": label,
+                    "text": page["full_text"],
+                    "tokens": estimate_tokens(page["full_text"]),
+                    "join_with_hr": uses_hr_separator and bool(slices),
+                    "skip_llm": True,
+                    "heading_context": "",
+                }
+            )
+            continue
+
+        page_tokens = estimate_tokens(page["full_text"])
+        if page_tokens > safe_limit:
+            _flush_group()
+            if page["marker"] and page["body"]:
+                marker_tokens = estimate_tokens(page["marker"])
+                sub_limit = max(300, safe_limit - marker_tokens - 12)
+                sub_chunks = split_markdown_chunks(page["body"], max_chunk_tokens=sub_limit, overlap_tokens=0)
+            else:
+                sub_chunks = split_markdown_chunks(page["full_text"], max_chunk_tokens=safe_limit, overlap_tokens=0)
+            sub_total = len(sub_chunks)
+            for j, sub in enumerate(sub_chunks, start=1):
+                sub_text = f"{page['marker']}\n\n{sub['text']}" if (j == 1 and page["marker"] and page["body"]) else sub["text"]
+                label = (
+                    f"Page {page['page_num']} (part {j}/{sub_total})"
+                    if page["page_num"] is not None
+                    else f"Part {j}/{sub_total}"
+                )
+                slices.append(
+                    {
+                        "page_label": label,
+                        "text": sub_text,
+                        "tokens": estimate_tokens(sub_text),
+                        "join_with_hr": j == 1 and uses_hr_separator and bool(slices),
+                        "skip_llm": False,
+                        "heading_context": sub.get("heading_context", ""),
+                    }
+                )
+            continue
+
+        if cur_group:
+            candidate = page_sep.join([*(g["full_text"] for g in cur_group), page["full_text"]])
+            if estimate_tokens(candidate) > safe_limit:
+                _flush_group()
+        cur_group.append(page)
+
+    _flush_group()
+    total = len(slices)
+    for idx, sl in enumerate(slices, start=1):
+        sl["index"] = idx
+        sl["total"] = total
+    return slices

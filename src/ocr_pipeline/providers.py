@@ -719,6 +719,7 @@ def chat_text(
     temperature: float = 0.1,
     max_tokens: int = 1024,
     client: httpx.Client | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> str:
     """Run text-only completion on the configured Assistant LLM provider."""
     spec = get_provider_spec(endpoint.provider_id)
@@ -732,10 +733,13 @@ def chat_text(
     if spec.protocol == "ollama":
         base = resolve_base_url(spec.id, endpoint.base_url)
         url = f"{base}/api/chat"
+        options: dict[str, object] = {"temperature": temperature, "num_ctx": endpoint.num_ctx}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
         payload: dict = {
             "model": endpoint.model,
             "stream": False,
-            "options": {"temperature": temperature, "num_ctx": endpoint.num_ctx},
+            "options": options,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -751,7 +755,7 @@ def chat_text(
             resp.raise_for_status()
             return str(resp.json().get("message", {}).get("content", "")).strip()
 
-        return _invoke_with_retries(endpoint, call, client, None)
+        return _invoke_with_retries(endpoint, call, client, cancel_event)
 
     if spec.protocol == "openai_compat":
         messages = []
@@ -765,6 +769,7 @@ def chat_text(
             temperature=temperature,
             max_tokens=max_tokens,
             client=client,
+            cancel_event=cancel_event,
         )
 
     if spec.protocol == "anthropic":
@@ -775,6 +780,7 @@ def chat_text(
             temperature=temperature,
             max_tokens=max_tokens,
             client=client,
+            cancel_event=cancel_event,
         )
 
     if spec.protocol == "google":
@@ -786,6 +792,7 @@ def chat_text(
             temperature=temperature,
             max_tokens=max_tokens,
             client=client,
+            cancel_event=cancel_event,
         )
 
     raise ProviderError(f"Unsupported protocol '{spec.protocol}'.")

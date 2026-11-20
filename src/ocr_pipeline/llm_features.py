@@ -7,10 +7,12 @@ OCR proofreading.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import logging
 from pathlib import Path
 import re
+import threading
 
 import httpx
 
@@ -25,10 +27,13 @@ from .artifacts import (
 )
 from .llm_context import (
     choose_adequate_context,
+    compute_cleanup_budgets,
     endpoint_with_ctx,
     estimate_tokens,
     split_markdown_chunks,
+    split_markdown_pages_for_cleanup,
 )
+from .ollama_client import JobCancelledError
 from .providers import ProviderEndpoint, chat_text
 
 logger = logging.getLogger("ocr_pipeline")
@@ -108,8 +113,11 @@ def _summarize_chunk_map(
     endpoint: ProviderEndpoint,
     *,
     client: httpx.Client | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> str:
     """Summarize one structural Markdown chunk cleanly in the Map step."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise JobCancelledError("Cancelled by user.")
     heading_note = f"Section path: {chunk['heading_context']}\n" if chunk.get("heading_context") else ""
     system = (
         "Summarize this excerpt from a longer archived document in 2 to 4 concise factual sentences. "
@@ -125,6 +133,7 @@ def _summarize_chunk_map(
         temperature=0.1,
         max_tokens=320,
         client=client,
+        cancel_event=cancel_event,
     )
     cleaned = " ".join(_strip_think_and_fences(raw).split())
     prefix = f"Section {chunk['index']}/{chunk['total']}"
@@ -139,6 +148,7 @@ def _reduce_summary_blocks(
     target_tokens: int,
     *,
     client: httpx.Client | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> list[str]:
     """Recursively group and condense map summaries if dozens of chunks exceed reduce context."""
     current = list(blocks)
@@ -147,6 +157,8 @@ def _reduce_summary_blocks(
         "preserving all major subjects, technical terms, and conclusions. Output plain prose only."
     )
     for _depth in range(4):
+        if cancel_event is not None and cancel_event.is_set():
+            raise JobCancelledError("Cancelled by user.")
         combined = "\n\n".join(current)
         if estimate_tokens(combined) <= target_tokens or len(current) <= 2:
             return current
@@ -164,6 +176,7 @@ def _reduce_summary_blocks(
                     temperature=0.1,
                     max_tokens=360,
                     client=client,
+                    cancel_event=cancel_event,
                 )
                 merged = " ".join(_strip_think_and_fences(merged_raw).split())
                 next_level.append(f"Part {len(next_level) + 1}: {merged}" if merged else batch[0])
@@ -179,6 +192,7 @@ def _reduce_summary_blocks(
                 temperature=0.1,
                 max_tokens=360,
                 client=client,
+                cancel_event=cancel_event,
             )
             merged = " ".join(_strip_think_and_fences(merged_raw).split())
             next_level.append(f"Part {len(next_level) + 1}: {merged}" if merged else batch[0])
@@ -193,6 +207,7 @@ def _prepare_doc_for_llm(
     expected_output_tokens: int = 512,
     system_info: dict | None = None,
     client: httpx.Client | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[str, ProviderEndpoint, dict]:
     """Prepare full document or hierarchical map-reduce digest sized for hardware VRAM.
 
@@ -250,7 +265,9 @@ def _prepare_doc_for_llm(
         selection.vram_plan.vram_at_recommended_gb,
     )
 
-    chunk_summaries = [_summarize_chunk_map(c, map_endpoint, client=client) for c in chunks]
+    chunk_summaries = [
+        _summarize_chunk_map(c, map_endpoint, client=client, cancel_event=cancel_event) for c in chunks
+    ]
 
     # Pick reduce context sized to hold the condensed summaries (+ headings) comfortably in VRAM.
     draft_digest = "\n\n".join(filter(None, [header_block, "Section Summaries:\n" + "\n\n".join(chunk_summaries)]))
@@ -264,7 +281,13 @@ def _prepare_doc_for_llm(
 
     header_tokens = estimate_tokens(header_block) + 80
     reduce_body_budget = max(500, reduce_sel.max_single_pass_input_tokens - header_tokens)
-    reduced_sections = _reduce_summary_blocks(chunk_summaries, reduce_endpoint, reduce_body_budget, client=client)
+    reduced_sections = _reduce_summary_blocks(
+        chunk_summaries,
+        reduce_endpoint,
+        reduce_body_budget,
+        client=client,
+        cancel_event=cancel_event,
+    )
 
     condensed_doc = "\n\n".join(
         filter(None, [header_block, "Condensed Full-Document Sections:\n" + "\n\n".join(reduced_sections)])
@@ -464,11 +487,19 @@ def analyze_artifact_all(
     max_tags: int = 5,
     system_info: dict | None = None,
     client: httpx.Client | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict:
     """Compute tags, descriptive filename, and summary via one shared digest (and map-reduce if large)."""
     doc_payload, tuned_ep, _ = _prepare_doc_for_llm(
-        text, endpoint, expected_output_tokens=512, system_info=system_info, client=client
+        text,
+        endpoint,
+        expected_output_tokens=512,
+        system_info=system_info,
+        client=client,
+        cancel_event=cancel_event,
     )
+    if cancel_event is not None and cancel_event.is_set():
+        raise JobCancelledError("Cancelled by user.")
     system = (
         "Analyze this archived Markdown document and return strictly valid JSON matching:\n"
         '{"tags": ["<subject-1>", "<subject-2>"], "filename": "<Subject_Words_Here>.md", '
@@ -480,7 +511,16 @@ def analyze_artifact_all(
     user = f"Document:\n{doc_payload}"
     if known_tags:
         user += f"\n\nOptional existing archive tags (reuse ONLY if accurately relevant): {', '.join(known_tags[:30])}"
-    raw = chat_text(tuned_ep, system, user, json_mode=True, temperature=0.1, max_tokens=512, client=client)
+    raw = chat_text(
+        tuned_ep,
+        system,
+        user,
+        json_mode=True,
+        temperature=0.1,
+        max_tokens=512,
+        client=client,
+        cancel_event=cancel_event,
+    )
     data = _parse_json_object(raw)
 
     tags = _clean_tag_candidates(
@@ -506,77 +546,87 @@ def cleanup_ocr_markdown(
     *,
     system_info: dict | None = None,
     client: httpx.Client | None = None,
+    cancel_event: threading.Event | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
 ) -> str:
     """Fix OCR typos, broken line wraps, and Markdown/LaTeX formatting without losing content.
 
-    Because cleanup outputs roughly 1 token per input token, large documents are split
-    losslessly along structural boundaries and proofread chunk-by-chunk within VRAM limits.
+    Slices the document along `<!-- Page N -->` boundaries bounded by both `num_ctx` and
+    the model's per-call max output tokens so proofread output is never truncated.
     """
     meta, body = parse_frontmatter(text)
     clean_body = body.strip()
     if not clean_body:
         return format_frontmatter(meta, "") if meta else ""
 
-    body_tokens = estimate_tokens(clean_body)
-    # 1:1 input+output fits best with a moderate ceiling so small local models stay crisp and fast.
-    selection = choose_adequate_context(
-        endpoint,
-        clean_body,
-        expected_output_tokens=min(4096, max(1024, body_tokens + 256)),
-        system_info=system_info,
-        max_cap_ctx=16384,
-    )
-    tuned_ep = endpoint_with_ctx(endpoint, selection.chosen_num_ctx)
-    # Leave room for system prompt + ~1:1 output tokens inside chosen_num_ctx.
-    safe_chunk_tokens = max(500, min(int(selection.chosen_num_ctx * 0.36), 2800))
-
     system = (
         "You are an archival Markdown proofreader. Clean up obvious OCR typos, broken line breaks mid-sentence, "
         "malformed Markdown tables, and broken LaTeX delimiters in the document body. "
-        "Preserve EVERY section, fact, number, equation, `[Figure: ...]` placeholder, and `<!-- Page N -->` marker. "
+        "Preserve EVERY section, fact, number, equation, `[Figure: ...]` placeholder, `<!-- OCR ERROR ... -->` notice, "
+        "`---` page break, and `<!-- Page N -->` marker. "
         "Do NOT summarize, omit content, or add commentary. Output ONLY the cleaned Markdown text."
     )
+    sys_tokens = estimate_tokens(system)
+    budget = compute_cleanup_budgets(
+        endpoint,
+        clean_body,
+        system_prompt_tokens=sys_tokens,
+        system_info=system_info,
+    )
+    tuned_ep = endpoint_with_ctx(endpoint, budget.chosen_num_ctx)
+    slices = split_markdown_pages_for_cleanup(clean_body, max_slice_tokens=budget.max_slice_input_tokens)
 
-    if body_tokens <= safe_chunk_tokens:
-        max_out = max(1024, min(8192, int(body_tokens * 1.4) + 512))
-        cleaned_body = chat_text(
+    if len(slices) > 1:
+        logger.info(
+            "OCR cleanup splitting document (~%d tokens) into %d page slices (num_ctx=%d, max_out=%d, slice_cap=%d)",
+            budget.body_tokens,
+            len(slices),
+            tuned_ep.num_ctx,
+            budget.max_output_tokens,
+            budget.max_slice_input_tokens,
+        )
+
+    cleaned_pieces: list[tuple[bool, str]] = []
+    for sl in slices:
+        if cancel_event is not None and cancel_event.is_set():
+            raise JobCancelledError("Cancelled by user.")
+        if on_progress is not None:
+            on_progress(int(sl["index"]), int(sl["total"]), str(sl["page_label"]))
+        if sl.get("skip_llm"):
+            cleaned_pieces.append((bool(sl.get("join_with_hr")), str(sl["text"])))
+            continue
+
+        heading_hint = (
+            f"(Context section for reference only — do not repeat unless already in the excerpt: {sl['heading_context']})\n\n"
+            if len(slices) > 1 and sl.get("heading_context")
+            else ""
+        )
+        user_prompt = f"{heading_hint}{sl['text']}"
+        prompt_tokens = estimate_tokens(user_prompt) + sys_tokens
+        available_ctx = max(512, budget.chosen_num_ctx - prompt_tokens - 128)
+        target_out = max(512, int(sl["tokens"] * 1.35) + 384)
+        call_max_tokens = min(budget.max_output_tokens, available_ctx, target_out)
+
+        out = chat_text(
             tuned_ep,
             system,
-            clean_body,
+            user_prompt,
             json_mode=False,
             temperature=0.0,
-            max_tokens=max_out,
+            max_tokens=call_max_tokens,
             client=client,
+            cancel_event=cancel_event,
         )
-        cleaned_body = _strip_think_and_fences(cleaned_body) or clean_body
+        cleaned_piece = _strip_think_and_fences(out)
+        cleaned_pieces.append((bool(sl.get("join_with_hr")), cleaned_piece if cleaned_piece else str(sl["text"])))
+
+    if not cleaned_pieces:
+        cleaned_body = clean_body
     else:
-        chunks = split_markdown_chunks(clean_body, max_chunk_tokens=safe_chunk_tokens, overlap_tokens=0)
-        logger.info(
-            "OCR cleanup splitting document (~%d tokens) into %d lossless chunks (num_ctx=%d)",
-            body_tokens,
-            len(chunks),
-            tuned_ep.num_ctx,
-        )
-        cleaned_parts: list[str] = []
-        for chunk in chunks:
-            heading_hint = (
-                f"(Context section for reference only — do not repeat unless already in the excerpt: {chunk['heading_context']})\n\n"
-                if chunk.get("heading_context")
-                else ""
-            )
-            max_out = max(1024, min(6144, int(chunk["tokens"] * 1.45) + 400))
-            out = chat_text(
-                tuned_ep,
-                system,
-                f"{heading_hint}{chunk['text']}",
-                json_mode=False,
-                temperature=0.0,
-                max_tokens=max_out,
-                client=client,
-            )
-            cleaned_piece = _strip_think_and_fences(out)
-            cleaned_parts.append(cleaned_piece if cleaned_piece else chunk["text"])
-        cleaned_body = "\n\n".join(cleaned_parts)
+        assembled = [cleaned_pieces[0][1]]
+        for join_hr, piece in cleaned_pieces[1:]:
+            assembled.append(("\n\n---\n\n" if join_hr else "\n\n") + piece)
+        cleaned_body = "".join(assembled)
 
     if meta:
         return format_frontmatter(meta, cleaned_body)

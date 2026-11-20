@@ -261,6 +261,7 @@ async function syncSettingsToJobForm(forceRefresh = false) {
     ["jobAutoTag", settings.auto_tag_on_ocr],
     ["jobAutoSummarize", settings.auto_summarize_on_ocr],
     ["jobAutoRename", settings.auto_rename_on_ocr],
+    ["jobAutoCleanup", settings.auto_cleanup_on_ocr],
   ]) {
     el(id).disabled = !llmOn;
     el(id).checked = llmOn && Boolean(val);
@@ -551,6 +552,10 @@ async function refreshActiveJob() {
   }
   renderJobHistory(allJobs);
   renderJobDetail(job);
+  if (prev && prev !== job.status && job.status === "completed" && job.files.length) {
+    const targetFile = job.files.includes(state.activeFile) ? state.activeFile : job.files[0];
+    openOutputFile(job.job_id, targetFile).catch(() => {});
+  }
   el("logViewer").textContent = logText;
   const anyRunning = allJobs.some((j) => !["completed", "failed", "cancelled"].includes(j.status));
   if (!anyRunning) {
@@ -809,6 +814,7 @@ el("jobForm").addEventListener("submit", async (e) => {
     fd.append("auto_tag", String(el("jobAutoTag").checked));
     fd.append("auto_summarize", String(el("jobAutoSummarize").checked));
     fd.append("auto_rename", String(el("jobAutoRename").checked));
+    fd.append("auto_cleanup", String(el("jobAutoCleanup").checked));
   }
   if (state.sourceMode === "upload") {
     const nativeEntries = [];
