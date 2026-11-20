@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import json
 import os
 from pathlib import Path
@@ -323,6 +323,48 @@ def notify_existing_instance(guard: SingleInstanceGuard, *, wait_seconds: float 
     return False
 
 
+def confirm_quit_with_active_tasks(summary: str, window: webview.Window | None = None) -> bool:
+    """Warn the user before quitting while OCR jobs, model downloads, or updates are active."""
+    detail = summary.strip() or "active background tasks"
+    title = "Active Tasks Running — OcrPipeline"
+    message = (
+        f"OcrPipeline currently has active tasks running ({detail}).\n\n"
+        "Quitting now will stop unfinished tasks. Quit anyway?"
+    )
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            flags = 0x00000004 | 0x00000030 | 0x00000100 | 0x00010000 | 0x00040000
+            return int(ctypes.windll.user32.MessageBoxW(0, message, title, flags)) == 6
+        except Exception:
+            pass
+    if window is not None:
+        try:
+            return bool(window.create_confirmation_dialog(title, message))
+        except Exception:
+            pass
+    return True
+
+
+def decide_window_close_action(
+    *,
+    quitting: bool,
+    sigint: bool,
+    minimize_to_tray: bool,
+    active_tasks: dict,
+    confirm_fn: Callable[[str], bool],
+) -> str:
+    """Decide whether closing the desktop window should hide, cancel, or exit."""
+    if quitting or sigint:
+        return "close"
+    if minimize_to_tray:
+        return "hide"
+    if active_tasks.get("has_active_tasks") and not confirm_fn(str(active_tasks.get("summary") or "")):
+        return "cancel"
+    return "close"
+
+
 def launch_desktop_app(
     port: int | None = None,
     ollama_url: str | None = None,
@@ -399,14 +441,79 @@ def launch_desktop_app(
         def on_activate() -> None:
             threading.Thread(target=show_window, daemon=True).start()
 
+        app_ref: dict[str, object] = {"app": None}
+        server_ref: dict[str, uvicorn.Server | None] = {"server": None}
+        quit_confirm_lock = threading.Lock()
+
+        def stop_services() -> None:
+            quitting.set()
+            tray = tray_ref.get("icon")
+            if tray is not None:
+                tray.stop()
+            srv = server_ref.get("server")
+            if srv is not None:
+                srv.should_exit = True
+
+        def cancel_active_jobs() -> None:
+            app_obj = app_ref.get("app")
+            if app_obj is not None:
+                try:
+                    app_obj.state.cancel_active_jobs()
+                except Exception:
+                    pass
+
+        def get_active_tasks() -> dict:
+            app_obj = app_ref.get("app")
+            if app_obj is not None:
+                try:
+                    return dict(app_obj.state.get_active_tasks())
+                except Exception:
+                    pass
+            return {"has_active_tasks": False, "summary": ""}
+
+        def force_quit() -> None:
+            cancel_active_jobs()
+            stop_services()
+            guard.release()
+            win = window_ref.get("win")
+            if win is not None:
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+            # Safety net: force exit if pywebview/WebView2 COM teardown hangs during MSI upgrade
+            safety = threading.Timer(3.0, os._exit, args=(0,))
+            safety.daemon = True
+            safety.start()
+
+        def request_tray_quit(_icon: object = None, _item: object = None) -> None:
+            def worker() -> None:
+                if not quit_confirm_lock.acquire(blocking=False):
+                    return
+                try:
+                    tasks = get_active_tasks()
+                    if tasks.get("has_active_tasks") and not confirm_quit_with_active_tasks(
+                        str(tasks.get("summary") or ""),
+                        window=window_ref.get("win"),
+                    ):
+                        return
+                    force_quit()
+                finally:
+                    quit_confirm_lock.release()
+
+            threading.Thread(target=worker, daemon=True).start()
+
         app = create_app(
             ollama_url=ollama_url,
             on_job_finished=on_job_finished,
             on_activate=on_activate,
             activate_token=activate_token,
+            on_quit=force_quit,
         )
+        app_ref["app"] = app
         uv_config = uvicorn.Config(app, host=host, port=chosen_port, log_level="warning", log_config=None)
         server = uvicorn.Server(uv_config)
+        server_ref["server"] = server
         threading.Thread(target=server.run, daemon=True).start()
         _wait_for_server(base_url)
         guard.write_info(chosen_port, activate_token)
@@ -416,24 +523,11 @@ def launch_desktop_app(
             archive.mkdir(parents=True, exist_ok=True)
             open_in_file_manager(archive)
 
-        def stop_services() -> None:
-            quitting.set()
-            tray = tray_ref.get("icon")
-            if tray is not None:
-                tray.stop()
-            server.should_exit = True
-
-        def quit_app(_icon: object = None, _item: object = None) -> None:
-            stop_services()
-            win = window_ref.get("win")
-            if win is not None:
-                win.destroy()
-
         tray_menu = pystray.Menu(
             pystray.MenuItem("Open OcrPipeline", show_window, default=True),
             pystray.MenuItem("Open Archive Folder", open_archive),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", quit_app),
+            pystray.MenuItem("Quit", request_tray_quit),
         )
         tray_icon = pystray.Icon("ocr_pipeline", generate_app_icon_image(64), "OcrPipeline", tray_menu)
         tray_ref["icon"] = tray_icon
@@ -480,11 +574,20 @@ def launch_desktop_app(
                 window_state["in_tray"] = False
 
         def on_closing() -> bool:
-            if quitting.is_set():
+            action = decide_window_close_action(
+                quitting=quitting.is_set(),
+                sigint=bool(getattr(webview.guilib, "_sigint_received", False)),
+                minimize_to_tray=bool(load_settings().minimize_to_tray),
+                active_tasks=get_active_tasks(),
+                confirm_fn=lambda summary: confirm_quit_with_active_tasks(summary, window=window),
+            )
+            if action == "close":
+                if not quitting.is_set():
+                    cancel_active_jobs()
+                    stop_services()
                 return True
-            if getattr(webview.guilib, "_sigint_received", False) or not load_settings().minimize_to_tray:
-                stop_services()
-                return True
+            if action == "cancel":
+                return False
             with win_state_lock:
                 window_state["in_tray"] = True
                 window_state["focused"] = False
@@ -500,7 +603,8 @@ def launch_desktop_app(
             webview.start(icon=str(window_icon_path))
         finally:
             if not quitting.is_set():
-                quit_app()
+                cancel_active_jobs()
+                stop_services()
     finally:
         guard.release()
 

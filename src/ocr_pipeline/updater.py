@@ -2,11 +2,13 @@
 
 from collections.abc import Callable
 from datetime import datetime
+import os
 from pathlib import Path
 import platform
 import re
 import subprocess
 import tarfile
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -144,12 +146,29 @@ def _apply_downloaded_installer(dest: Path, system: str | None = None) -> dict:
     suffix = dest.name.lower()
 
     if sys_name == "windows" and suffix.endswith(".msi"):
-        subprocess.Popen(["msiexec", "/i", str(dest)])
+        popen_kwargs: dict[str, object] = {"close_fds": True}
+        if os.name == "nt":
+            creationflags = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+            if creationflags:
+                popen_kwargs["creationflags"] = creationflags
+        try:
+            proc = subprocess.Popen(["msiexec", "/i", str(dest)], **popen_kwargs)
+        except OSError as exc:
+            raise UpdateError(f"Failed to launch Windows installer: {exc}") from exc
+        if proc is not None and hasattr(proc, "poll"):
+            time.sleep(0.35)
+            rc = proc.poll()
+            if rc is not None and rc != 0:
+                raise UpdateError(f"Windows installer failed to start (exit code {rc}).")
         return {
             "installed": True,
             "launched_installer": True,
+            "should_quit": True,
             "path": str(dest),
-            "message": f"Launched Windows installer ({dest.name}). Follow the wizard to finish upgrading.",
+            "message": f"Launched Windows installer ({dest.name}). OcrPipeline will close so the upgrade can proceed.",
         }
 
     if sys_name == "darwin" and suffix.endswith(".dmg"):
@@ -157,6 +176,7 @@ def _apply_downloaded_installer(dest: Path, system: str | None = None) -> dict:
         return {
             "installed": True,
             "launched_installer": True,
+            "should_quit": False,
             "path": str(dest),
             "message": f"Opened disk image ({dest.name}). Drag OcrPipeline.app into Applications.",
         }
@@ -174,6 +194,7 @@ def _apply_downloaded_installer(dest: Path, system: str | None = None) -> dict:
             return {
                 "installed": True,
                 "launched_installer": False,
+                "should_quit": False,
                 "path": str(dest),
                 "message": "Updated Linux installation via install.sh. Restart OcrPipeline to apply.",
             }
@@ -182,6 +203,7 @@ def _apply_downloaded_installer(dest: Path, system: str | None = None) -> dict:
     return {
         "installed": False,
         "launched_installer": True,
+        "should_quit": False,
         "path": str(dest),
         "message": f"Downloaded {dest.name} to {dest.parent}.",
     }

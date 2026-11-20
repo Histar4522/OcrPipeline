@@ -301,6 +301,8 @@ def create_app(
     on_job_finished: Callable[[JobState], None] | None = None,
     on_activate: Callable[[], None] | None = None,
     activate_token: str = "",
+    on_quit: Callable[[], None] | None = None,
+    quit_delay_seconds: float = 0.8,
 ) -> FastAPI:
     """Create and configure the FastAPI Desktop & Web UI application."""
     app = FastAPI(title="OcrPipeline", version=get_display_version())
@@ -327,12 +329,69 @@ def create_app(
         "completed_mb": 0.0,
         "total_mb": 0.0,
         "done": False,
+        "should_quit": False,
         "error": "",
         "message": "",
         "path": "",
     }
     effective_ocr_fn: OcrFn = ocr_fn or vision_ocr_with_config
     runtime_role_status: dict[str, dict[str, str]] = {}
+
+    def _active_tasks_summary() -> dict:
+        with lock:
+            active_jobs = [
+                {
+                    "job_id": j.job_id,
+                    "label": j.label,
+                    "status": j.status,
+                }
+                for j in jobs.values()
+                if j.status in ("waiting", "queued", "running", "cancelling")
+            ]
+            pulling_model = str(pull_state["model"]) if pull_state["active"] else ""
+            updating_tag = str(update_state["tag"] or "update") if update_state["active"] else ""
+
+        parts: list[str] = []
+        if active_jobs:
+            count = len(active_jobs)
+            parts.append(f"{count} active OCR job" + ("" if count == 1 else "s"))
+        if pulling_model:
+            parts.append(f"model download ({pulling_model})")
+        if updating_tag:
+            parts.append(f"update download ({updating_tag})")
+        return {
+            "has_active_tasks": bool(active_jobs or pulling_model or updating_tag),
+            "has_working_tasks": bool(active_jobs or pulling_model),
+            "active_jobs": active_jobs,
+            "active_job_count": len(active_jobs),
+            "pulling_model": pulling_model,
+            "updating_tag": updating_tag,
+            "summary": ", ".join(parts),
+        }
+
+    def _cancel_all_active_jobs() -> int:
+        clients_to_close: list[httpx.Client] = []
+        cancelled = 0
+        with lock:
+            for j in jobs.values():
+                if j.status in ("waiting", "queued", "running", "cancelling"):
+                    j.cancel_event.set()
+                    if j.status == "waiting":
+                        j.status = "cancelled"
+                    elif j.status != "cancelling":
+                        j.status = "cancelling"
+                    if j.active_client is not None:
+                        clients_to_close.append(j.active_client)
+                    cancelled += 1
+        for client in clients_to_close:
+            try:
+                client.close()
+            except Exception:
+                pass
+        return cancelled
+
+    app.state.get_active_tasks = _active_tasks_summary
+    app.state.cancel_active_jobs = _cancel_all_active_jobs
 
     def _record_role_error(role: str, credential_id: str, exc: Exception) -> None:
         code = classify_exception_status(exc)
@@ -990,6 +1049,10 @@ def create_app(
         except ProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.get("/api/tasks/active")
+    def get_active_tasks() -> dict:
+        return _active_tasks_summary()
+
     @app.get("/api/updates/check")
     def check_for_updates() -> dict:
         try:
@@ -1002,8 +1065,15 @@ def create_app(
         tag = str(payload.get("tag", "")).strip()
         download_url = str(payload.get("download_url", "")).strip()
         asset_name = str(payload.get("asset_name", "")).strip()
+        allow_active_tasks = bool(payload.get("allow_active_tasks", False))
         if not download_url or not asset_name:
             raise HTTPException(status_code=400, detail="download_url and asset_name are required.")
+        tasks = _active_tasks_summary()
+        if tasks["has_working_tasks"] and not allow_active_tasks:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Active tasks in progress ({tasks['summary']}). Confirm before updating.",
+            )
         with lock:
             if update_state["active"]:
                 raise HTTPException(status_code=409, detail="An update download is already in progress.")
@@ -1016,6 +1086,7 @@ def create_app(
                     "completed_mb": 0.0,
                     "total_mb": 0.0,
                     "done": False,
+                    "should_quit": False,
                     "error": "",
                     "message": "",
                     "path": "",
@@ -1032,17 +1103,25 @@ def create_app(
         def worker() -> None:
             try:
                 res = download_and_install_update(download_url, asset_name, on_progress=on_progress)
+                should_quit = bool(res.get("should_quit"))
                 with lock:
                     update_state["active"] = False
                     update_state["done"] = True
                     update_state["percent"] = 100.0
                     update_state["status"] = "completed"
+                    update_state["should_quit"] = should_quit
                     update_state["message"] = str(res.get("message", ""))
                     update_state["path"] = str(res.get("path", ""))
+                if should_quit and on_quit is not None:
+                    _cancel_all_active_jobs()
+                    timer = threading.Timer(max(0.0, quit_delay_seconds), on_quit)
+                    timer.daemon = True
+                    timer.start()
             except Exception as exc:
                 with lock:
                     update_state["active"] = False
                     update_state["done"] = True
+                    update_state["should_quit"] = False
                     update_state["status"] = "failed"
                     update_state["error"] = str(exc)
 

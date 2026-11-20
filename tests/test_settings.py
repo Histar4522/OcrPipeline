@@ -271,3 +271,55 @@ def test_single_instance_lock_activation_and_duplicate_exit(tmp_path: Path, monk
     assert not g1.info_file.exists()
     assert g2.acquire() is True
     g2.release()
+
+
+def test_decide_window_close_action_warns_only_on_actual_quit() -> None:
+    import ocr_pipeline.desktop as desk
+
+    prompts: list[str] = []
+
+    def confirm_no(summary: str) -> bool:
+        prompts.append(summary)
+        return False
+
+    def confirm_yes(summary: str) -> bool:
+        prompts.append(summary)
+        return True
+
+    active = {"has_active_tasks": True, "summary": "1 active OCR job"}
+    idle = {"has_active_tasks": False, "summary": ""}
+
+    assert (
+        desk.decide_window_close_action(
+            quitting=False, sigint=False, minimize_to_tray=True, active_tasks=active, confirm_fn=confirm_no
+        )
+        == "hide"
+    )
+    assert (
+        desk.decide_window_close_action(
+            quitting=False, sigint=False, minimize_to_tray=False, active_tasks=idle, confirm_fn=confirm_no
+        )
+        == "close"
+    )
+    assert prompts == []
+
+    assert (
+        desk.decide_window_close_action(
+            quitting=False, sigint=False, minimize_to_tray=False, active_tasks=active, confirm_fn=confirm_no
+        )
+        == "cancel"
+    )
+    assert prompts == ["1 active OCR job"]
+
+    assert (
+        desk.decide_window_close_action(
+            quitting=False, sigint=False, minimize_to_tray=False, active_tasks=active, confirm_fn=confirm_yes
+        )
+        == "close"
+    )
+    assert (
+        desk.decide_window_close_action(
+            quitting=True, sigint=False, minimize_to_tray=True, active_tasks=active, confirm_fn=confirm_no
+        )
+        == "close"
+    )

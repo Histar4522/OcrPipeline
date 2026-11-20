@@ -44,6 +44,7 @@ const state = {
   rawMarkdown: "",
   pollTimer: null,
   lastJobStatuses: new Map(),
+  hasActiveJobs: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -424,6 +425,7 @@ const STATUS_BADGE_MAP = {
 };
 
 function renderJobHistory(jobs) {
+  state.hasActiveJobs = (jobs || []).some((j) => ["waiting", "queued", "running", "cancelling"].includes(j.status));
   el("jobCountBadge").textContent = String(jobs.length);
   const list = el("jobHistoryList");
   if (!jobs.length) {
@@ -854,6 +856,12 @@ function syncWindowFocus(focused) {
 window.addEventListener("focus", () => syncWindowFocus(true));
 window.addEventListener("blur", () => syncWindowFocus(false));
 window.addEventListener("pywebviewready", () => syncWindowFocus(document.hasFocus()));
+window.addEventListener("beforeunload", (e) => {
+  if (!window.pywebview && state.hasActiveJobs && !updatesView.isClosingForUpdate()) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
 
 (async () => {
   syncWindowFocus(document.hasFocus());

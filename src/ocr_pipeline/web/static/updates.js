@@ -1,10 +1,12 @@
 import {
   checkUpdates,
+  fetchActiveTasks,
   fetchUpdateInstallStatus,
   installUpdate,
   openExternalUrl,
   saveSettings,
 } from "./api.js";
+import { bsConfirm } from "./dialogs.js";
 import { renderMarkdownContent } from "./markdown.js";
 
 const el = (id) => document.getElementById(id);
@@ -25,6 +27,8 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
   const updState = {
     data: null,
     pollTimer: null,
+    closingForUpdate: false,
+    lastPercent: 0,
   };
 
   function stopPolling() {
@@ -122,11 +126,27 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
 
   async function startInstall(release) {
     if (!release?.asset?.download_url) return;
+    const tasks = await fetchActiveTasks().catch(() => null);
+    let allowActiveTasks = false;
+    if (tasks?.has_working_tasks) {
+      const ok = await bsConfirm({
+        title: "Active Tasks Running",
+        message:
+          `Currently running: ${tasks.summary}. Updating will launch the installer and close OcrPipeline on Windows, stopping unfinished tasks. Continue with update?`,
+        confirmText: "Continue & Update",
+        variant: "warning",
+      });
+      if (!ok) return;
+      allowActiveTasks = true;
+    }
+
     const panel = el("updateProgressPanel");
     const bar = el("updateProgressBar");
     const statusText = el("updateProgressText");
     const pctText = el("updateProgressPercent");
 
+    updState.closingForUpdate = false;
+    updState.lastPercent = 0;
     panel.classList.remove("d-none");
     bar.className = "progress-bar progress-bar-striped progress-bar-animated";
     bar.style.width = "0%";
@@ -139,6 +159,7 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
         tag: release.tag_name,
         download_url: release.asset.download_url,
         asset_name: release.asset.name,
+        allow_active_tasks: allowActiveTasks,
       });
     } catch (err) {
       bar.className = "progress-bar bg-danger";
@@ -154,6 +175,7 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
         const st = await fetchUpdateInstallStatus();
         const pct = Math.min(100, Math.round(st.percent || 0));
         const sizeNote = st.total_mb > 0 ? ` (${st.completed_mb} / ${st.total_mb} MB)` : "";
+        updState.lastPercent = pct;
         bar.style.width = `${pct}%`;
         pctText.textContent = `${pct}%`;
         if (!st.done) {
@@ -161,19 +183,32 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
           return;
         }
         stopPolling();
-        setUpdateButtonState({ enabled: Boolean(release.asset?.download_url), label: `Update to ${release.tag_name}` });
         if (st.error) {
           bar.className = "progress-bar bg-danger";
           statusText.textContent = st.error;
+          setUpdateButtonState({ enabled: Boolean(release.asset?.download_url), label: `Update to ${release.tag_name}` });
           showToast("Update Failed", st.error, "danger");
+        } else if (st.should_quit) {
+          updState.closingForUpdate = true;
+          bar.className = "progress-bar bg-success";
+          statusText.textContent = st.message || "Installer launched. Closing OcrPipeline...";
+          setUpdateButtonState({ enabled: false, label: "Closing..." });
+          showToast("Update Ready", st.message || "Installer launched. Closing OcrPipeline...", "success");
         } else {
           bar.className = "progress-bar bg-success";
           statusText.textContent = st.message || "Update ready.";
+          setUpdateButtonState({ enabled: Boolean(release.asset?.download_url), label: `Update to ${release.tag_name}` });
           showToast("Update Ready", st.message || "Installer launched.", "success");
         }
       } catch {
         stopPolling();
-        setUpdateButtonState({ enabled: Boolean(release.asset?.download_url), label: `Update to ${release.tag_name}` });
+        if (updState.closingForUpdate || updState.lastPercent >= 100) {
+          bar.className = "progress-bar bg-success";
+          statusText.textContent = "Installer launched. Closing OcrPipeline...";
+          setUpdateButtonState({ enabled: false, label: "Closing..." });
+        } else {
+          setUpdateButtonState({ enabled: Boolean(release.asset?.download_url), label: `Update to ${release.tag_name}` });
+        }
       }
     }, 500);
   }
@@ -228,5 +263,5 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
   });
 
   renderSelectedReleasePreview("");
-  return { check, syncSettingsForm, getData: () => updState.data };
+  return { check, syncSettingsForm, getData: () => updState.data, isClosingForUpdate: () => updState.closingForUpdate };
 }

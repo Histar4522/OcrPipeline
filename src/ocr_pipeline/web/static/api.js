@@ -53,6 +53,7 @@ export const saveSettings = (payload) =>
     body: JSON.stringify(payload),
   });
 export const checkUpdates = () => requestJson("/api/updates/check");
+export const fetchActiveTasks = () => requestJson("/api/tasks/active");
 export const installUpdate = (payload) =>
   requestJson("/api/updates/install", {
     method: "POST",

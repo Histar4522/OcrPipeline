@@ -1100,3 +1100,148 @@ def test_post_ocr_ai_cleanup_order_and_cancellation(tmp_path: Path, monkeypatch:
     assert st4["status"] == "cancelled"
     assert "Brken OCR wrod." in (archive_dir / "Cleanup_Cancel.md").read_text(encoding="utf-8")
     assert "LLM CLEANUP CANCELLED" in client.get(f"/api/jobs/{j4}/log").text
+
+
+def test_auto_update_windows_auto_quit_and_active_task_guard(tmp_path: Path, monkeypatch: object) -> None:
+    import pytest
+    from ocr_pipeline import updater
+    import ocr_pipeline.web.server as srv
+
+    # 1. Windows MSI launch passes close_fds=True, sets should_quit=True, and fails cleanly if msiexec cannot start
+    popen_kwargs_seen: list[dict] = []
+
+    class FakeProcOk:
+        def poll(self) -> int | None:
+            return None
+
+    class FakeProcFail:
+        def poll(self) -> int:
+            return 1619
+
+    def fake_popen_ok(args: list[str], **kw: object) -> FakeProcOk:
+        popen_kwargs_seen.append(dict(kw))
+        return FakeProcOk()
+
+    fake_msi = tmp_path / "OcrPipeline-0.4.0-x64.msi"
+    fake_msi.write_bytes(b"msi")
+    monkeypatch.setattr(updater.subprocess, "Popen", fake_popen_ok)  # type: ignore[attr-defined]
+    res = updater._apply_downloaded_installer(fake_msi, system="Windows")
+    assert res["installed"] is True
+    assert res["launched_installer"] is True
+    assert res["should_quit"] is True
+    assert popen_kwargs_seen and popen_kwargs_seen[0].get("close_fds") is True
+
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: FakeProcFail())  # type: ignore[attr-defined]
+    with pytest.raises(updater.UpdateError, match="exit code 1619"):
+        updater._apply_downloaded_installer(fake_msi, system="Windows")
+
+    def fake_popen_oserr(args: list[str], **kw: object) -> object:
+        raise OSError("missing msiexec")
+
+    monkeypatch.setattr(updater.subprocess, "Popen", fake_popen_oserr)  # type: ignore[attr-defined]
+    with pytest.raises(updater.UpdateError, match="Failed to launch Windows installer"):
+        updater._apply_downloaded_installer(fake_msi, system="Windows")
+
+    # 2. Server active-tasks endpoint, 409 guard while OCR is running, and on_quit trigger after Windows update
+    job_started = threading.Event()
+    job_cancelled = threading.Event()
+    quit_called = threading.Event()
+
+    def gated_ocr(image_b64: str, cfg: OcrConfig, client: object, cancel_event: threading.Event | None = None) -> str:
+        job_started.set()
+        if cancel_event is not None:
+            cancel_event.wait(timeout=3.0)
+            if cancel_event.is_set():
+                job_cancelled.set()
+        return "done"
+
+    settings_path = tmp_path / "settings.json"
+    archive_dir = tmp_path / "archive"
+    save_settings(AppSettings(archive_dir=str(archive_dir)), settings_path)
+    app = create_app(
+        jobs_root=tmp_path / "jobs",
+        settings_path=settings_path,
+        ocr_fn=gated_ocr,
+        on_quit=lambda: quit_called.set(),  # type: ignore[arg-type,return-value]
+        quit_delay_seconds=0.05,
+    )
+    client = TestClient(app)
+
+    assert client.get("/api/tasks/active").json()["has_active_tasks"] is False
+
+    job_resp = client.post(
+        "/api/jobs",
+        data={"source_mode": "upload", "job_name": "active_work"},
+        files=[("files", ("p1.png", _png_bytes(), "image/png"))],
+    )
+    assert job_resp.status_code == 200
+    assert job_started.wait(timeout=2.0)
+
+    active = client.get("/api/tasks/active").json()
+    assert active["has_active_tasks"] is True
+    assert active["has_working_tasks"] is True
+    assert active["active_job_count"] == 1
+
+    # Without allow_active_tasks=True, install must reject with 409 Conflict
+    blocked = client.post(
+        "/api/updates/install",
+        json={
+            "tag": "v0.4.0",
+            "download_url": "https://github.com/Histar4522/OcrPipeline/releases/download/v0.4.0/OcrPipeline-0.4.0-x64.msi",
+            "asset_name": "OcrPipeline-0.4.0-x64.msi",
+        },
+    )
+    assert blocked.status_code == 409
+
+    # Failed update must NOT trigger on_quit or cancel the running job
+    monkeypatch.setattr(
+        srv,
+        "download_and_install_update",
+        lambda *a, **k: (_ for _ in ()).throw(updater.UpdateError("network failure")),
+    )  # type: ignore[attr-defined]
+    fail_start = client.post(
+        "/api/updates/install",
+        json={
+            "tag": "v0.4.0",
+            "download_url": "https://github.com/Histar4522/OcrPipeline/releases/download/v0.4.0/OcrPipeline-0.4.0-x64.msi",
+            "asset_name": "OcrPipeline-0.4.0-x64.msi",
+            "allow_active_tasks": True,
+        },
+    )
+    assert fail_start.status_code == 200
+    deadline = time.time() + 3.0
+    st = client.get("/api/updates/install-status").json()
+    while not st["done"] and time.time() < deadline:
+        time.sleep(0.05)
+        st = client.get("/api/updates/install-status").json()
+    assert st["status"] == "failed"
+    assert st["should_quit"] is False
+    assert not quit_called.is_set()
+
+    # Successful Windows update with allow_active_tasks=True cancels active jobs and triggers on_quit
+    monkeypatch.setattr(
+        srv,
+        "download_and_install_update",
+        lambda *a, **k: {
+            "installed": True,
+            "launched_installer": True,
+            "should_quit": True,
+            "path": str(fake_msi),
+            "message": "Launched installer.",
+        },
+    )  # type: ignore[attr-defined]
+    ok_start = client.post(
+        "/api/updates/install",
+        json={
+            "tag": "v0.4.0",
+            "download_url": "https://github.com/Histar4522/OcrPipeline/releases/download/v0.4.0/OcrPipeline-0.4.0-x64.msi",
+            "asset_name": "OcrPipeline-0.4.0-x64.msi",
+            "allow_active_tasks": True,
+        },
+    )
+    assert ok_start.status_code == 200
+    assert quit_called.wait(timeout=3.0)
+    assert job_cancelled.wait(timeout=2.0)
+    st_ok = client.get("/api/updates/install-status").json()
+    assert st_ok["done"] is True
+    assert st_ok["should_quit"] is True
