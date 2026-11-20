@@ -220,9 +220,14 @@ def test_single_instance_lock_activation_and_duplicate_exit(tmp_path: Path, monk
     from ocr_pipeline.web.server import create_app
 
     lock_dir = tmp_path / "instance"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    stale_info = lock_dir / "instance.json"
+    stale_info.write_text('{"port": 1, "token": "stale"}', encoding="utf-8")
+
     g1 = desk.SingleInstanceGuard(lock_dir)
     g2 = desk.SingleInstanceGuard(lock_dir)
     assert g1.acquire() is True
+    assert not stale_info.exists()
     assert g2.acquire() is False
 
     g1.write_info(45123, "tok-secret")
@@ -235,12 +240,12 @@ def test_single_instance_lock_activation_and_duplicate_exit(tmp_path: Path, monk
     web_only = TestClient(create_app(jobs_root=tmp_path / "jobs1", settings_path=cfg_path))
     assert web_only.post("/api/desktop/activate", json={"token": "tok-secret"}).status_code == 404
 
-    activations: list[tuple[str, str, str]] = []
+    activations: list[int] = []
     desk_client = TestClient(
         create_app(
             jobs_root=tmp_path / "jobs2",
             settings_path=cfg_path,
-            on_activate=lambda t, m, v: activations.append((t, m, v)) is None,
+            on_activate=lambda: activations.append(1),  # type: ignore[arg-type,return-value]
             activate_token="tok-secret",
         )
     )
@@ -253,20 +258,13 @@ def test_single_instance_lock_activation_and_duplicate_exit(tmp_path: Path, monk
     )  # type: ignore[attr-defined]
     assert desk.notify_existing_instance(g2, wait_seconds=0.3) is True
     assert len(activations) == 1
-    assert activations[0][0] == "Already Running"
-    assert activations[0][2] == "danger"
 
-    # launch_desktop_app returns 1 immediately when lock is already held & notifies existing window
-    fallback_alerts: list[tuple[str, str]] = []
-    monkeypatch.setattr(desk, "_show_fallback_error_alert", lambda t, m: fallback_alerts.append((t, m)))  # type: ignore[attr-defined]
-    assert desk.launch_desktop_app(lock_dir=lock_dir) == 1
+    # launch_desktop_app notifies existing instance and quits silently with 0 (even if unreachable)
+    assert desk.launch_desktop_app(lock_dir=lock_dir) == 0
     assert len(activations) == 2
-    assert fallback_alerts == []
 
-    # When existing instance does not respond, launch_desktop_app still exits 1 with fallback alert
     monkeypatch.setattr(desk, "notify_existing_instance", lambda *a, **k: False)  # type: ignore[attr-defined]
-    assert desk.launch_desktop_app(lock_dir=lock_dir) == 1
-    assert len(fallback_alerts) == 1
+    assert desk.launch_desktop_app(lock_dir=lock_dir) == 0
 
     # Releasing allows acquiring again and removes instance info file
     g1.release()

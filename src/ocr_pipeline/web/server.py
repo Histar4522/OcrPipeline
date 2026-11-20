@@ -297,7 +297,7 @@ def create_app(
     settings_path: Path | None = None,
     ocr_fn: OcrFn | None = None,
     on_job_finished: Callable[[JobState], None] | None = None,
-    on_activate: Callable[[str, str, str], bool] | None = None,
+    on_activate: Callable[[], None] | None = None,
     activate_token: str = "",
 ) -> FastAPI:
     """Create and configure the FastAPI Desktop & Web UI application."""
@@ -552,16 +552,8 @@ def create_app(
         token = str(payload.get("token") or "")
         if not secrets.compare_digest(token, activate_token):
             raise HTTPException(status_code=403, detail="Invalid activation token.")
-        title = str(payload.get("title") or "Already Running").strip() or "Already Running"
-        message = (
-            str(payload.get("message") or "OcrPipeline is already running.").strip()
-            or "OcrPipeline is already running."
-        )
-        variant = str(payload.get("variant") or "danger").strip() or "danger"
-        if variant not in ("primary", "secondary", "success", "danger", "warning", "info"):
-            variant = "danger"
-        shown = bool(on_activate(title, message, variant))
-        return {"ok": True, "toast_shown": shown}
+        on_activate()
+        return {"ok": True}
 
     @app.get("/api/system-info")
     def system_info() -> dict:

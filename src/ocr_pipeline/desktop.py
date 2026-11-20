@@ -241,6 +241,10 @@ class SingleInstanceGuard:
 
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._fd = fd
+            try:
+                self.info_file.unlink(missing_ok=True)
+            except OSError:
+                pass
             return True
         except OSError:
             os.close(fd)
@@ -289,25 +293,26 @@ class SingleInstanceGuard:
             self._fd = None
 
 
-def notify_existing_instance(
-    guard: SingleInstanceGuard,
-    *,
-    title: str = "Already Running",
-    message: str = "OcrPipeline is already running. Multiple instances are not allowed.",
-    variant: str = "danger",
-    wait_seconds: float = 2.5,
-) -> bool:
-    """Signal an already-running desktop instance to raise its window and show an in-app toast."""
+def notify_existing_instance(guard: SingleInstanceGuard, *, wait_seconds: float = 3.0) -> bool:
+    """Signal an already-running desktop instance to bring its window to the front."""
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         info = guard.read_info()
         port = int(info.get("port") or 0) if info else 0
         token = str(info.get("token") or "") if info else ""
+        pid = int(info.get("pid") or 0) if info else 0
         if port > 0 and token:
+            if os.name == "nt" and pid > 0:
+                try:
+                    import ctypes
+
+                    ctypes.windll.user32.AllowSetForegroundWindow(pid)
+                except Exception:
+                    pass
             try:
                 resp = httpx.post(
                     f"http://127.0.0.1:{port}/api/desktop/activate",
-                    json={"token": token, "title": title, "message": message, "variant": variant},
+                    json={"token": token},
                     timeout=2.0,
                 )
                 if resp.status_code == 200 and resp.json().get("ok"):
@@ -318,23 +323,12 @@ def notify_existing_instance(
     return False
 
 
-def _show_fallback_error_alert(title: str, message: str) -> None:
-    """Show a native error dialog as fallback if the existing instance did not respond."""
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
-        except Exception:
-            pass
-
-
 def launch_desktop_app(
     port: int | None = None,
     ollama_url: str | None = None,
     lock_dir: Path | None = None,
 ) -> int:
-    """Launch OcrPipeline in a pywebview window with single-instance lock, tray, and in-app activation."""
+    """Launch OcrPipeline in a pywebview window with single-instance lock and tray retention."""
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
@@ -342,15 +336,8 @@ def launch_desktop_app(
 
     guard = SingleInstanceGuard(lock_dir)
     if not guard.acquire():
-        activated = notify_existing_instance(guard)
-        sys.stderr.write("Error: OcrPipeline is already running.\n")
-        sys.stderr.flush()
-        if not activated:
-            _show_fallback_error_alert(
-                "OcrPipeline Already Running",
-                "Another instance of OcrPipeline is already running.",
-            )
-        return 1
+        notify_existing_instance(guard)
+        return 0
 
     host = "127.0.0.1"
     chosen_port = port or _find_free_port(host)
@@ -360,10 +347,8 @@ def launch_desktop_app(
     window_icon_path = ensure_window_icon_file()
     tray_ref: dict[str, pystray.Icon | None] = {"icon": None}
     quitting = threading.Event()
-    page_loaded = threading.Event()
     window_ref: dict[str, webview.Window | None] = {"win": None}
     window_state = {"focused": True, "in_tray": False, "minimized": False}
-    pending_toasts: list[tuple[str, str, str]] = []
     win_state_lock = threading.Lock()
 
     try:
@@ -401,38 +386,18 @@ def launch_desktop_app(
 
         def show_window(_icon: object = None, _item: object = None) -> None:
             with win_state_lock:
-                was_hidden_or_min = window_state["in_tray"] or window_state["minimized"]
+                was_minimized = window_state["minimized"]
                 window_state["in_tray"] = False
                 window_state["minimized"] = False
                 window_state["focused"] = True
             win = window_ref.get("win")
             if win is not None:
-                win.show()
-                if was_hidden_or_min:
+                if was_minimized:
                     win.restore()
-                try:
-                    win.on_top = True
-                    win.on_top = False
-                except Exception:
-                    pass
+                win.show()
 
-        def _emit_window_toast(win: webview.Window, title: str, message: str, variant: str) -> None:
-            win.evaluate_js(
-                f"window.__showAppToast && window.__showAppToast({json.dumps(title)}, {json.dumps(message)}, {json.dumps(variant)})"
-            )
-
-        def on_activate(title: str, message: str, variant: str) -> bool:
-            show_window()
-            win = window_ref.get("win")
-            if win is not None and page_loaded.is_set():
-                try:
-                    _emit_window_toast(win, title, message, variant)
-                    return True
-                except Exception:
-                    pass
-            with win_state_lock:
-                pending_toasts.append((title, message, variant))
-            return True
+        def on_activate() -> None:
+            threading.Thread(target=show_window, daemon=True).start()
 
         app = create_app(
             ollama_url=ollama_url,
@@ -498,18 +463,9 @@ def launch_desktop_app(
                 )
 
         def on_loaded() -> None:
-            page_loaded.set()
             drop_el = window.dom.get_element("#dropZone")
             if drop_el is not None:
                 drop_el.events.drop += DOMEventHandler(on_drop, prevent_default=True)
-            with win_state_lock:
-                queued = list(pending_toasts)
-                pending_toasts.clear()
-            for title, msg, variant in queued:
-                try:
-                    _emit_window_toast(window, title, msg, variant)
-                except Exception:
-                    pass
 
         window.events.loaded += on_loaded
 

@@ -84,8 +84,6 @@ function showToast(title, body, variant = "primary") {
   toast.show();
 }
 
-window.__showAppToast = showToast;
-
 function currentJobChoice() {
   return readRoleModelChoice({
     selectEl: el("jobVisualModelSelect"),
