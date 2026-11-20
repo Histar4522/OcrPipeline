@@ -901,3 +901,44 @@ def test_credentials_crud_and_provider_status(tmp_path: Path) -> None:
 
     # Deleting Garage Server credential succeeds cleanly
     assert client.delete(f"/api/credentials/{garage_id}").status_code == 200
+
+
+def test_recent_tags_ordering_and_suggestion_limit(tmp_path: Path) -> None:
+    import os
+
+    client = _make_test_app(tmp_path)
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    specs = [
+        ("alpha.md", ["zebra", "ancient"], 1_000_000.0),
+        ("beta.md", ["middle"], 2_000_000.0),
+        ("gamma.md", ["fresh-one", "fresh-two"], 3_000_000.0),
+    ]
+    for name, tags, ts in specs:
+        md = archive_dir / name
+        md.write_text("# Content\n", encoding="utf-8")
+        meta = archive_dir / f"{name}.meta"
+        meta.write_text(f'{{"tags": {tags!r}}}'.replace("'", '"'), encoding="utf-8")
+        os.utime(md, (ts, ts))
+        os.utime(meta, (ts, ts))
+
+    res = client.get("/api/artifacts")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["recent_tags"] == ["fresh-one", "fresh-two", "middle", "ancient", "zebra"]
+    assert [t["name"] for t in data["tags"]] == ["ancient", "fresh-one", "fresh-two", "middle", "zebra"]
+    assert all("last_used" in t for t in data["tags"])
+
+    # Updating alpha.md.meta via API bumps its tags to the front of recent_tags
+    upd = client.patch("/api/artifacts/tags", json={"path": "alpha.md", "tags": ["zebra"]})
+    assert upd.status_code == 200
+    res2 = client.get("/api/artifacts")
+    assert res2.json()["recent_tags"][0] == "zebra"
+
+    # Frontend tag_input defaults maxSuggestions to 3 rather than 12
+    tag_js = client.get("/static/tag_input.js")
+    assert tag_js.status_code == 200
+    assert "maxSuggestions = 3" in tag_js.text
+    assert "available.slice(0, maxSuggestions)" in tag_js.text
+    assert "slice(0, 12)" not in tag_js.text

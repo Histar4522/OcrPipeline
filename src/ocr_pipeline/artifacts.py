@@ -318,6 +318,7 @@ def scan_artifacts(
     folder_set: set[str] = set()
     folder_doc_counts: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
+    tag_last_used: dict[str, float] = {}
     q_lower = query.strip().lower()
     folder_filter = folder.strip().strip("/")
     tag_filter = tag.strip().lstrip("#").lower()
@@ -356,8 +357,13 @@ def scan_artifacts(
             else:
                 doc_tags = extract_tags(raw_text)
             doc_summary = str(sidecar.get("summary") or fm_meta.get("summary") or "")
+            stat = md_file.stat()
+            meta_path = artifact_meta_path(md_file)
+            tag_mtime = max(stat.st_mtime, meta_path.stat().st_mtime) if meta_path.is_file() else stat.st_mtime
             for t in doc_tags:
                 tag_counts[t] = tag_counts.get(t, 0) + 1
+                if tag_mtime > tag_last_used.get(t, 0.0):
+                    tag_last_used[t] = tag_mtime
 
             if browse_exact_folder:
                 if rel_folder != current_folder:
@@ -371,7 +377,6 @@ def scan_artifacts(
                 if q_lower not in haystack:
                     continue
 
-            stat = md_file.stat()
             items.append(
                 {
                     "path": rel_path,
@@ -415,6 +420,10 @@ def scan_artifacts(
         "breadcrumbs": _build_breadcrumbs(current_folder),
         "child_folders": child_folders,
         "folders": sorted(folder_set, key=str.lower),
-        "tags": [{"name": k, "count": tag_counts[k]} for k in sorted(tag_counts, key=str.lower)],
+        "tags": [
+            {"name": k, "count": tag_counts[k], "last_used": tag_last_used.get(k, 0.0)}
+            for k in sorted(tag_counts, key=str.lower)
+        ],
+        "recent_tags": sorted(tag_counts, key=lambda k: (-tag_last_used.get(k, 0.0), k.lower())),
         "artifacts": items,
     }

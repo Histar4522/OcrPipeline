@@ -329,7 +329,7 @@ export function initArtifactsView({ showToast, onArchiveChanged }) {
     artState.items = data.artifacts || [];
     artState.folders = data.folders || [];
     artState.folderSummary = data.folder_summary || null;
-    artState.knownTags = (data.tags || []).map((t) => t.name);
+    artState.knownTags = data.recent_tags || (data.tags || []).map((t) => t.name);
     artState.obsidianMode = Boolean(data.obsidian_mode);
     el("artifactDirLabel").textContent = data.archive_dir || "";
     el("obsidianBadge").classList.toggle("d-none", !artState.obsidianMode);

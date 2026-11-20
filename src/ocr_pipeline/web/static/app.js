@@ -556,7 +556,9 @@ async function refreshActiveJob() {
   if (!anyRunning) {
     clearInterval(state.pollTimer);
     state.pollTimer = null;
-    fetchArtifacts().then((d) => jobTagEditor.setSuggestions((d.tags || []).map((t) => t.name))).catch(() => {});
+    fetchArtifacts()
+      .then((d) => jobTagEditor.setSuggestions(d.recent_tags || (d.tags || []).map((t) => t.name)))
+      .catch(() => {});
   }
 }
 
@@ -583,7 +585,7 @@ async function syncJobArchiveOptions(selectFolder = null) {
       sel.appendChild(opt);
     }
     if (prev && (folderData.folders || []).includes(prev)) sel.value = prev;
-    jobTagEditor.setSuggestions((artData.tags || []).map((t) => t.name));
+    jobTagEditor.setSuggestions(artData.recent_tags || (artData.tags || []).map((t) => t.name));
   } catch {
     // Ignore transient fetch failures
   }

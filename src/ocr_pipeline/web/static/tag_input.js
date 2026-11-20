@@ -4,7 +4,7 @@ function normalizeTag(raw) {
   return String(raw || "").trim().replace(/^#+/, "").replace(/\s+/g, "-");
 }
 
-export function createTagInput(container, { placeholder = "Type a tag and press Enter..." } = {}) {
+export function createTagInput(container, { placeholder = "Type a tag and press Enter...", maxSuggestions = 3 } = {}) {
   let tags = [];
   let suggestions = [];
 
@@ -58,7 +58,7 @@ export function createTagInput(container, { placeholder = "Type a tag and press 
       lbl.className = "small text-muted me-1 align-self-center";
       lbl.textContent = "Suggestions:";
       suggEl.appendChild(lbl);
-      for (const s of available.slice(0, 12)) {
+      for (const s of available.slice(0, maxSuggestions)) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "btn btn-xs btn-outline-secondary rounded-pill";
