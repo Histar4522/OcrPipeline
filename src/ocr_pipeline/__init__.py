@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 @lru_cache(maxsize=1)
