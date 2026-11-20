@@ -9,6 +9,7 @@ import mimetypes
 from pathlib import Path
 import platform
 import queue
+import secrets
 import shutil
 import sys
 import threading
@@ -296,6 +297,8 @@ def create_app(
     settings_path: Path | None = None,
     ocr_fn: OcrFn | None = None,
     on_job_finished: Callable[[JobState], None] | None = None,
+    on_activate: Callable[[str, str, str], bool] | None = None,
+    activate_token: str = "",
 ) -> FastAPI:
     """Create and configure the FastAPI Desktop & Web UI application."""
     app = FastAPI(title="OcrPipeline", version=get_display_version())
@@ -541,6 +544,24 @@ def create_app(
             "platform": platform.system(),
             "setup_completed": cfg.setup_completed,
         }
+
+    @app.post("/api/desktop/activate")
+    def activate_desktop(payload: dict = Body(default={})) -> dict:
+        if on_activate is None or not activate_token:
+            raise HTTPException(status_code=404, detail="Desktop activation unavailable.")
+        token = str(payload.get("token") or "")
+        if not secrets.compare_digest(token, activate_token):
+            raise HTTPException(status_code=403, detail="Invalid activation token.")
+        title = str(payload.get("title") or "Already Running").strip() or "Already Running"
+        message = (
+            str(payload.get("message") or "OcrPipeline is already running.").strip()
+            or "OcrPipeline is already running."
+        )
+        variant = str(payload.get("variant") or "danger").strip() or "danger"
+        if variant not in ("primary", "secondary", "success", "danger", "warning", "info"):
+            variant = "danger"
+        shown = bool(on_activate(title, message, variant))
+        return {"ok": True, "toast_shown": shown}
 
     @app.get("/api/system-info")
     def system_info() -> dict:

@@ -210,3 +210,66 @@ def test_multi_credentials_unique_names_and_singleton_local(tmp_path: Path) -> N
     delete_credential(s, str(ds["id"]))
     assert s.llm_enabled is False
     assert s.llm_credential_id == OLLAMA_LOCAL_CRED_ID
+
+
+def test_single_instance_lock_activation_and_duplicate_exit(tmp_path: Path, monkeypatch: object) -> None:
+    from fastapi.testclient import TestClient
+
+    import ocr_pipeline.desktop as desk
+    from ocr_pipeline.settings import AppSettings, save_settings
+    from ocr_pipeline.web.server import create_app
+
+    lock_dir = tmp_path / "instance"
+    g1 = desk.SingleInstanceGuard(lock_dir)
+    g2 = desk.SingleInstanceGuard(lock_dir)
+    assert g1.acquire() is True
+    assert g2.acquire() is False
+
+    g1.write_info(45123, "tok-secret")
+    assert g2.read_info() == {"pid": g2.read_info()["pid"], "port": 45123, "token": "tok-secret"}  # type: ignore[index]
+
+    # Verify /api/desktop/activate auth and callback behavior
+    archive_dir = tmp_path / "archive"
+    cfg_path = tmp_path / "settings.json"
+    save_settings(AppSettings(archive_dir=str(archive_dir)), cfg_path)
+    web_only = TestClient(create_app(jobs_root=tmp_path / "jobs1", settings_path=cfg_path))
+    assert web_only.post("/api/desktop/activate", json={"token": "tok-secret"}).status_code == 404
+
+    activations: list[tuple[str, str, str]] = []
+    desk_client = TestClient(
+        create_app(
+            jobs_root=tmp_path / "jobs2",
+            settings_path=cfg_path,
+            on_activate=lambda t, m, v: activations.append((t, m, v)) is None,
+            activate_token="tok-secret",
+        )
+    )
+    assert desk_client.post("/api/desktop/activate", json={"token": "wrong"}).status_code == 403
+
+    monkeypatch.setattr(
+        desk.httpx,
+        "post",
+        lambda url, json=None, timeout=2.0: desk_client.post("/api/desktop/activate", json=json),
+    )  # type: ignore[attr-defined]
+    assert desk.notify_existing_instance(g2, wait_seconds=0.3) is True
+    assert len(activations) == 1
+    assert activations[0][0] == "Already Running"
+    assert activations[0][2] == "danger"
+
+    # launch_desktop_app returns 1 immediately when lock is already held & notifies existing window
+    fallback_alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr(desk, "_show_fallback_error_alert", lambda t, m: fallback_alerts.append((t, m)))  # type: ignore[attr-defined]
+    assert desk.launch_desktop_app(lock_dir=lock_dir) == 1
+    assert len(activations) == 2
+    assert fallback_alerts == []
+
+    # When existing instance does not respond, launch_desktop_app still exits 1 with fallback alert
+    monkeypatch.setattr(desk, "notify_existing_instance", lambda *a, **k: False)  # type: ignore[attr-defined]
+    assert desk.launch_desktop_app(lock_dir=lock_dir) == 1
+    assert len(fallback_alerts) == 1
+
+    # Releasing allows acquiring again and removes instance info file
+    g1.release()
+    assert not g1.info_file.exists()
+    assert g2.acquire() is True
+    g2.release()
