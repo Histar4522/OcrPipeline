@@ -1142,6 +1142,46 @@ def test_auto_update_windows_auto_quit_and_active_task_guard(tmp_path: Path, mon
     with pytest.raises(updater.UpdateError, match="Failed to launch Windows installer"):
         updater._apply_downloaded_installer(fake_msi, system="Windows")
 
+    # Verify Linux tar.gz clears stale extracted versions before running install.sh and sets should_quit=False
+    import tarfile
+
+    linux_dl = tmp_path / "linux_upd"
+    stale_dir = linux_dl / "extracted" / "OcrPipeline-0.1.0-linux-x86_64"
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "install.sh").write_text("#!/bin/sh\necho old", encoding="utf-8")
+
+    tar_src = tmp_path / "OcrPipeline-0.4.0-linux-x86_64"
+    tar_src.mkdir()
+    (tar_src / "install.sh").write_text("#!/bin/sh\necho new", encoding="utf-8")
+    linux_tar = linux_dl / "OcrPipeline-0.4.0-linux-x86_64.tar.gz"
+    with tarfile.open(linux_tar, "w:gz") as tf:
+        tf.add(tar_src, arcname=tar_src.name)
+
+    ran_scripts: list[list[str]] = []
+
+    class FakeRunRes:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setattr(
+        updater.subprocess,
+        "run",
+        lambda args, **kw: ran_scripts.append(list(args)) or FakeRunRes(),
+    )  # type: ignore[attr-defined]
+    res_linux = updater._apply_downloaded_installer(linux_tar, system="Linux")
+    assert res_linux["installed"] is True
+    assert res_linux["should_quit"] is False
+    assert not stale_dir.exists()
+    assert len(ran_scripts) == 1 and "0.4.0" in ran_scripts[0][1]
+
+    # Verify macOS DMG launch sets should_quit=False cleanly
+    macos_launched: list[list[str]] = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: macos_launched.append(list(args)))  # type: ignore[attr-defined]
+    res_mac = updater._apply_downloaded_installer(tmp_path / "OcrPipeline-0.4.0-macOS-arm64.dmg", system="Darwin")
+    assert res_mac["launched_installer"] is True
+    assert res_mac["should_quit"] is False
+    assert macos_launched and macos_launched[0][0] == "open"
+
     # 2. Server active-tasks endpoint, 409 guard while OCR is running, and on_quit trigger after Windows update
     job_started = threading.Event()
     job_cancelled = threading.Event()

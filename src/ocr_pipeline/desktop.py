@@ -354,14 +354,18 @@ def decide_window_close_action(
     minimize_to_tray: bool,
     active_tasks: dict,
     confirm_fn: Callable[[str], bool],
+    defer_confirm: bool = False,
 ) -> str:
-    """Decide whether closing the desktop window should hide, cancel, or exit."""
+    """Decide whether closing the desktop window should hide, prompt, cancel, or exit."""
     if quitting or sigint:
         return "close"
     if minimize_to_tray:
         return "hide"
-    if active_tasks.get("has_active_tasks") and not confirm_fn(str(active_tasks.get("summary") or "")):
-        return "cancel"
+    if active_tasks.get("has_active_tasks"):
+        if defer_confirm:
+            return "prompt"
+        if not confirm_fn(str(active_tasks.get("summary") or "")):
+            return "cancel"
     return "close"
 
 
@@ -449,7 +453,10 @@ def launch_desktop_app(
             quitting.set()
             tray = tray_ref.get("icon")
             if tray is not None:
-                tray.stop()
+                try:
+                    tray.stop()
+                except Exception:
+                    pass
             srv = server_ref.get("server")
             if srv is not None:
                 srv.should_exit = True
@@ -472,21 +479,22 @@ def launch_desktop_app(
             return {"has_active_tasks": False, "summary": ""}
 
         def force_quit() -> None:
+            quitting.set()
             cancel_active_jobs()
-            stop_services()
-            guard.release()
             win = window_ref.get("win")
             if win is not None:
                 try:
                     win.destroy()
                 except Exception:
                     pass
-            # Safety net: force exit if pywebview/WebView2 COM teardown hangs during MSI upgrade
+            stop_services()
+            guard.release()
+            # Safety net: force exit if pywebview/WebView2 COM teardown hangs during upgrade
             safety = threading.Timer(3.0, os._exit, args=(0,))
             safety.daemon = True
             safety.start()
 
-        def request_tray_quit(_icon: object = None, _item: object = None) -> None:
+        def request_quit_with_confirm(_icon: object = None, _item: object = None) -> None:
             def worker() -> None:
                 if not quit_confirm_lock.acquire(blocking=False):
                     return
@@ -527,11 +535,14 @@ def launch_desktop_app(
             pystray.MenuItem("Open OcrPipeline", show_window, default=True),
             pystray.MenuItem("Open Archive Folder", open_archive),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", request_tray_quit),
+            pystray.MenuItem("Quit", request_quit_with_confirm),
         )
-        tray_icon = pystray.Icon("ocr_pipeline", generate_app_icon_image(64), "OcrPipeline", tray_menu)
-        tray_ref["icon"] = tray_icon
-        tray_icon.run_detached()
+        try:
+            tray_icon = pystray.Icon("ocr_pipeline", generate_app_icon_image(64), "OcrPipeline", tray_menu)
+            tray_ref["icon"] = tray_icon
+            tray_icon.run_detached()
+        except Exception:
+            tray_ref["icon"] = None
 
         api = DesktopApi(base_url, window_ref, window_state=window_state, window_state_lock=win_state_lock)
         window = webview.create_window(
@@ -577,15 +588,19 @@ def launch_desktop_app(
             action = decide_window_close_action(
                 quitting=quitting.is_set(),
                 sigint=bool(getattr(webview.guilib, "_sigint_received", False)),
-                minimize_to_tray=bool(load_settings().minimize_to_tray),
+                minimize_to_tray=bool(load_settings().minimize_to_tray) and tray_ref.get("icon") is not None,
                 active_tasks=get_active_tasks(),
                 confirm_fn=lambda summary: confirm_quit_with_active_tasks(summary, window=window),
+                defer_confirm=True,
             )
             if action == "close":
                 if not quitting.is_set():
                     cancel_active_jobs()
                     stop_services()
                 return True
+            if action == "prompt":
+                request_quit_with_confirm()
+                return False
             if action == "cancel":
                 return False
             with win_state_lock:

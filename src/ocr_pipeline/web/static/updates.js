@@ -132,7 +132,7 @@ export function initUpdatesView({ showToast, onOpenUpdateSection }) {
       const ok = await bsConfirm({
         title: "Active Tasks Running",
         message:
-          `Currently running: ${tasks.summary}. Updating will launch the installer and close OcrPipeline on Windows, stopping unfinished tasks. Continue with update?`,
+          `Currently running: ${tasks.summary}. Updating will download and launch/apply the update (and close OcrPipeline on Windows, stopping unfinished tasks). Continue with update?`,
         confirmText: "Continue & Update",
         variant: "warning",
       });

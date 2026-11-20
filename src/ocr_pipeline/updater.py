@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 import tarfile
 import time
@@ -183,10 +184,11 @@ def _apply_downloaded_installer(dest: Path, system: str | None = None) -> dict:
 
     if sys_name == "linux" and suffix.endswith(".tar.gz"):
         stage_dir = dest.parent / "extracted"
+        shutil.rmtree(stage_dir, ignore_errors=True)
         stage_dir.mkdir(parents=True, exist_ok=True)
         with tarfile.open(dest, "r:gz") as tf:
             tf.extractall(stage_dir, filter="data")
-        install_scripts = list(stage_dir.glob("*/install.sh"))
+        install_scripts = sorted(stage_dir.glob("*/install.sh"))
         if install_scripts:
             proc = subprocess.run(["sh", str(install_scripts[0])], capture_output=True, text=True, timeout=60)
             if proc.returncode != 0:

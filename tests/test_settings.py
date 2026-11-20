@@ -323,3 +323,16 @@ def test_decide_window_close_action_warns_only_on_actual_quit() -> None:
         )
         == "close"
     )
+    prompts.clear()
+    assert (
+        desk.decide_window_close_action(
+            quitting=False,
+            sigint=False,
+            minimize_to_tray=False,
+            active_tasks=active,
+            confirm_fn=confirm_no,
+            defer_confirm=True,
+        )
+        == "prompt"
+    )
+    assert prompts == []
